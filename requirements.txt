@@ -1,0 +1,3 @@
+google-cloud-resource-manager==1.10.3
+cirq==1.2.0
+# "Because why just flip a coin when you can install a 50MB quantum physics library?"
