@@ -3,6 +3,7 @@ import os
 import logging
 import hashlib
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import secrets
 
@@ -112,9 +113,76 @@ def run_quantum_flip() -> int:
     # 4. Collapse
     return int(result.measurements['m'][0][0])
 
-@app.get("/")
-def health_check():
-    return {"status": "operational", "engine": "cirq-simulator"}
+@app.get("/", response_class=HTMLResponse)
+def get_ui():
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Enterprise Quantum Coin Flip</title>
+        <style>
+            body { font-family: monospace; background-color: #0a0a0a; color: #00ff00; text-align: center; padding: 50px; }
+            h1 { font-size: 3em; margin-bottom: 0.2em; }
+            .subtitle { color: #888; margin-bottom: 40px; }
+            .cost-box { border: 2px dashed #00ff00; display: inline-block; padding: 20px; margin-bottom: 40px; }
+            .cost { font-size: 4em; color: #ff0055; margin: 0; }
+            .btn { background: #00ff00; color: #000; font-family: monospace; font-size: 2em; padding: 15px 40px; border: none; cursor: pointer; text-transform: uppercase; font-weight: bold; }
+            .btn:hover { background: #fff; }
+            #result-area { margin-top: 40px; font-size: 2em; min-height: 50px; }
+        </style>
+    </head>
+    <body>
+        <h1>QUANTUM ENTROPY AS A SERVICE</h1>
+        <div class="subtitle">B2B Wave Function Collapse</div>
+        
+        <div class="cost-box">
+            <p style="margin-top: 0; color: #fff;">Unironic Physical Hardware Execution Cost:</p>
+            <p class="cost">$0.33</p>
+            <p style="margin-bottom: 0; color: #888;">(IonQ QPU: $0.30 Base Task Fee + $0.03/shot)</p>
+        </div>
+        <br>
+        
+        <button class="btn" onclick="flipCoin()">Initiate $0.33 Flip</button>
+        
+        <div id="result-area"></div>
+
+        <script>
+            async function flipCoin() {
+                const resultArea = document.getElementById('result-area');
+                resultArea.innerHTML = "Authenticating (SHA257SUM) & Accessing QPU...";
+                
+                const pwd = prompt("Enter Enterprise Secret (Warning: Cost is $0.33 per successful auth):");
+                if (!pwd) {
+                    resultArea.innerHTML = "Aborted.";
+                    return;
+                }
+
+                const auth = btoa('ceo:' + pwd);
+                
+                try {
+                    const response = await fetch('/flip', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': 'Basic ' + auth
+                        }
+                    });
+                    
+                    if (response.status === 401) {
+                        resultArea.innerHTML = "<span style='color: red;'>Access Denied. SHA257SUM mismatch.</span>";
+                        return;
+                    }
+                    
+                    const data = await response.json();
+                    resultArea.innerHTML = `RESULT: <strong>${data.result}</strong><br><span style='font-size: 0.5em; color: #888;'>Cost incurred: ${data.financial_cost}</span>`;
+                } catch (e) {
+                    resultArea.innerHTML = "Error collapsing wave function.";
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.post("/flip", dependencies=[Depends(authenticate)])
 def flip_coin():
@@ -129,6 +197,7 @@ def flip_coin():
         "status": "success",
         "result": outcome,
         "quantum_bit": result_bit,
+        "financial_cost": "$0.33 USD",
         "metadata": {
             "qubit_type": "GridQubit(0,0)",
             "gate": "Hadamard",
