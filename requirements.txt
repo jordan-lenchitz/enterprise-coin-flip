@@ -1,3 +1,6 @@
-google-cloud-resource-manager==1.10.3
 cirq==1.2.0
-# "Because why just flip a coin when you can install a 50MB quantum physics library?"
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
