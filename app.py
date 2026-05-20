@@ -69,7 +69,7 @@ def calculate_sha257sum(data: str) -> str:
     reversed_suffix = suffix[::-1]
     return prefix + reversed_suffix
 
-EXPECTED_SHA257_HASH = calculate_sha257sum("correct-horse-battery-staple")
+EXPECTED_SHA257_HASH = calculate_sha257sum("111111111111111111111")
 ENTERPRISE_PASS_HASH = os.getenv("FLIP_PASSWORD_SHA257", EXPECTED_SHA257_HASH)
 
 def authenticate(credentials: HTTPBasicCredentials = Depends(security)):

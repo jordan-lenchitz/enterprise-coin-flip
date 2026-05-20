@@ -21,7 +21,7 @@ run the server:
    ```
 flip a coin (requires credentials):
    ```bash
-   curl -X POST http://localhost:8080/flip -u ceo:correct-horse-battery-staple
+   curl -X POST http://localhost:8080/flip -u ceo:111111111111111111111
    ```
 
 ### docker
