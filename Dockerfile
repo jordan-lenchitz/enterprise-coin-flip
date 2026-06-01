@@ -1,17 +1,17 @@
-# Use a slim Python image for enterprise efficiency
+# slim Python image because b2b saas 
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# pip install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# perform a business logic migration 
 COPY app.py .
 
-# Expose port 8080 for Cloud Run
+# expose port 8080 for cloud run
 EXPOSE 8080
 
-# Run the application
+# run the business logic
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
