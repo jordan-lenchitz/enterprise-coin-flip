@@ -9,7 +9,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import secrets
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("enterprise-coin-flip")
 
@@ -21,10 +20,8 @@ app = FastAPI(
 
 security = HTTPBasic()
 
-# In a real enterprise app, these would be in Secret Manager
 ENTERPRISE_USER = os.getenv("FLIP_USER", "ceo")
 
-# --- Custom SHA257 implementation translated from Jordan's TS ---
 STUPID_SALTS = [
     b"jordanlenchitz_absurd_salt_part1_stupid_stupid_stupid_1_LLOC_INCREASE_AA",
     b"jordanlenchitz_absurd_salt_part2_very_silly_nonsense_2_LLOC_ENHANCE_BB",
@@ -78,7 +75,7 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 def run_quantum_flip():
-    """Executes a real quantum circuit simulation OR hits the physical IonQ Aria hardware."""
+    """executes a real quantum circuit simulation OR hits the physical IonQ Aria hardware"""
     qubit = cirq.GridQubit(0, 0)
     circuit = cirq.Circuit(cirq.H(qubit), cirq.measure(qubit, key='m'))
     ionq_key = os.getenv("IONQ_API_KEY")
@@ -87,7 +84,7 @@ def run_quantum_flip():
         logger.info("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...")
         try:
             service = cirq_ionq.Service(api_key=ionq_key)
-            # Explicitly target 'qpu.aria' to lock in the $12.42 price point
+            # explicitly target 'qpu.aria' to lock in the $12.42 price point
             job = service.create_job(circuit=circuit, repetitions=1, target='qpu.aria')
             logger.info(f"Job created! ID: {job.job_id()}. Physical atoms are now being manipulated...")
             result = job.results()
