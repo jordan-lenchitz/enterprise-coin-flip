@@ -6,7 +6,6 @@ import cirq
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def create_persistent_project() -> str:
-    # User said: "we can make it persist i just want the real quantum LOL"
     project_id = f"coinflip-enterprise-prod"
     logging.info(f"Connecting to persistent GCP project: {project_id}...")
     time.sleep(1) 
@@ -21,32 +20,28 @@ def enable_quantum_apis(project_id: str):
 def run_quantum_circuit() -> int:
     logging.info("Connecting to Quantum Environment...")
     time.sleep(0.5)
-    
-    # --- The REAL Quantum part ---
-    # 1. Allocate a Qubit
+    # the UNIRONICALLY REAL quantum part!
+    # first we allocate a qubit
     qubit = cirq.GridQubit(0, 0)
-    
-    # 2. Build the circuit: Hadamard gate (superposition) -> Measure (collapse)
+    # then we build the circuit
+    # hadamard gate (superposition) -> measure (collapse)
     circuit = cirq.Circuit(
         cirq.H(qubit),
         cirq.measure(qubit, key='m')
     )
-    
     logging.info(f"Constructed Quantum Circuit:\n{circuit}")
     logging.info("Applying Hadamard gate (H) to Qubit(0, 0)...")
     time.sleep(0.5)
     logging.info("Measuring Qubit to collapse wave function...")
-    
-    # 3. Simulate the quantum circuit locally (since real hardware needs API keys & approval)
+    # then we simulate the quantum circuit locally
     simulator = cirq.Simulator()
     result = simulator.run(circuit, repetitions=1)
-    
-    # 4. Extract the collapsed bit
+    # and finally we extract the collapsed bit
     collapsed_value = result.measurements['m'][0][0]
     return int(collapsed_value)
 
 def main():
-    print("🪙 Starting Enterprise-Grade Quantum Coin Flip 🪙\n")
+    print("🪙 starting enterprise-grade coin flip 🪙\n")
     
     project_id = create_persistent_project()
     enable_quantum_apis(project_id)
