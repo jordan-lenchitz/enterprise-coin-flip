@@ -5,10 +5,10 @@ a B2B SaaS-ready microservice that flips a coin using actual quantum math via Io
 `gcloud run deploy quantum-coin-flip --source ./enterprise-coin-flip --region us-central1 --allow-unauthenticated --memory 512Mi --port 8080 --set-env-vars="IONQ_API_KEY=TODO"`
 
 ### features
-- **real quantum circuits** powered by IonQ Aria
-- **enterprise security** password-locked via HTTP Basic Authentication, backed by the proprietary 35-round **SHA257SUM** hashing algorithm with suffix reversal and salt interleaving
-- **cloud-native**: dockerized and ready for Google Cloud Run deployment
-- **restful api**: Interface with automated OpenAPI documentation
+- **real quantum circuits** powered by IonQ iff you want to go 100% quantum
+- **enterprise security** backed by the 35-round [`sha257sum`](https://sha257sum.website) algorithm
+- **cloud-native** and fully ready for google cloud run deployment iff you chose
+- **restful api** interface with the usual openAPI docs
 
 ## implementations
 ### python
