@@ -117,7 +117,7 @@ func runQuantumFlip() (int, string) {
 	return rand.Intn(2), "IonQ Aria Physical QPU (Go/Enterprise)"
 }
 
-func main() {
+func setupRouter() *gin.Engine {
 	enterpriseUser := os.Getenv("FLIP_USER")
 	if enterpriseUser == "" {
 		enterpriseUser = "ceo"
@@ -178,7 +178,7 @@ func main() {
     
     <div id="ledger"></div>
     <div id="final-result"></div>
-
+ 
     <script>
         let ledgerEntries = [
             { t: 0, txt: "Authenticating SHA257SUM protocol...", c: "$0.00" },
@@ -298,6 +298,12 @@ func main() {
 			},
 		})
 	})
+
+	return r
+}
+
+func main() {
+	r := setupRouter()
 
 	port := os.Getenv("PORT")
 	if port == "" {

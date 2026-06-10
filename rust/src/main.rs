@@ -274,11 +274,71 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::{test, App};
 
-    #[test]
-    fn test_sha257sum_parity() {
+    #[actix_web::test]
+    async fn test_sha257sum_parity() {
         let expected = "18bb824a4ad1f39be49cc91af302dad50e27f9af7ff17b5dade977dc3beb0a58";
         let result = calculate_sha257sum("111111111111111111111");
         assert_eq!(result, expected);
+    }
+
+    #[actix_web::test]
+    async fn test_run_quantum_flip_fallback() {
+        unsafe { std::env::remove_var("IONQ_API_KEY"); }
+        let (bit, env) = run_quantum_flip().await;
+        assert!(bit == 0 || bit == 1);
+        assert_eq!(env, "Production-Simulation (Rust/Free)");
+    }
+
+    #[actix_web::test]
+    async fn test_get_ui() {
+        unsafe { std::env::remove_var("IONQ_API_KEY"); }
+        let app = test::init_service(App::new().service(get_ui)).await;
+        let req = test::TestRequest::get().uri("/").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body = test::read_body(resp).await;
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("QUANTUM ENTROPY"));
+        assert!(body_str.contains("SIMULATOR ACTIVE: NO API KEY DETECTED"));
+    }
+
+    #[actix_web::test]
+    async fn test_flip_unauthorized() {
+        let app = test::init_service(App::new().service(flip_coin)).await;
+        let req = test::TestRequest::post().uri("/flip").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn test_flip_incorrect_credentials() {
+        let app = test::init_service(App::new().service(flip_coin)).await;
+        let req = test::TestRequest::post()
+            .uri("/flip")
+            .insert_header((actix_web::http::header::AUTHORIZATION, "Basic Y2VvOndyb25ncGFzc3dvcmQ="))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn test_flip_success() {
+        unsafe { std::env::remove_var("IONQ_API_KEY"); }
+        let app = test::init_service(App::new().service(flip_coin)).await;
+        // ceo:111111111111111111111 basic auth header
+        let req = test::TestRequest::post()
+            .uri("/flip")
+            .insert_header((actix_web::http::header::AUTHORIZATION, "Basic Y2VvOjExMTExMTExMTExMTExMTExMTExMQ=="))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        
+        let body = test::read_body(resp).await;
+        let resp_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp_json["status"], "success");
+        assert!(resp_json["result"] == "HEADS" || resp_json["result"] == "TAILS");
+        assert_eq!(resp_json["metadata"]["environment"], "Production-Simulation (Rust/Free)");
     }
 }

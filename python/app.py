@@ -228,16 +228,16 @@ def flip_coin():
     result_bit, environment = run_quantum_flip()
     outcome = "HEADS" if result_bit == 1 else "TAILS"
     logger.info(f"Wave function collapsed: {outcome} on {environment}")
-    return {{
+    return {
         "status": "success",
         "result": outcome,
         "quantum_bit": result_bit,
-        "metadata": {{
+        "metadata": {
             "qubit_type": "IonQ Aria physical trapped-ion",
             "gate": "Hadamard (H)",
             "environment": environment
-        }}
-    }}
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
