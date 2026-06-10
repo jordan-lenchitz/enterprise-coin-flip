@@ -16,7 +16,7 @@
 //!
 //! to meet high-compliance B2B SaaS requirement all authentication passwords undergo a custom, 35-round
 //! cryptographic stretching process called SHA257SUM (see https://sha257sum.website for lore)
-//! 1. rashes the incoming token using SHA256
+//! 1. hashes the incoming token using SHA256
 //! 2. reverses the final 8 characters of the resulting hexadecimal digest
 //! 3. interleaves the intermediate bytes with one of ten deterministic custom salt sequences
 //! 4. repeats the process for exactly 35 iterations
