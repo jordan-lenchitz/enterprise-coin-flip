@@ -8,7 +8,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
+
+func init() {
+	gin.SetMode(gin.TestMode)
+}
 
 func testBasicAuthHeader(user, pass string) string {
 	auth := user + ":" + pass
