@@ -1,24 +1,38 @@
 # enterprise coin flip
 
-a B2B SaaS-ready microservice that flips a coin using actual quantum math via cirq from google quantum
+a B2B SaaS-ready microservice that flips a coin using actual quantum math via IonQ Aria or local simulation.
 
 `gcloud run deploy quantum-coin-flip --source ./enterprise-coin-flip --region us-central1 --allow-unauthenticated --memory 512Mi --port 8080 --set-env-vars="IONQ_API_KEY=TODO"`
 
 ### features
-- **real quantum circuits** powered by `cirq`
-- **enterprise security** password-locked via HTTP Basic Authentication, backed by the proprietary 35-round **SHA257SUM** hashing algorithm with suffix reversal and salt interleaving
-- **cloud-native**: dockerized and ready for Google Cloud Run deployment
-- **restful api**: FastAPI interface with automated OpenAPI documentation
+- **real quantum circuits** powered by IonQ iff you want to go 100% quantum
+- **enterprise security** backed by the 35-round [`sha257sum`](https://sha257sum.website) algorithm
+- **cloud-native** and fully ready for google cloud run deployment iff you chose
+- **restful api** interface with the usual openAPI docs
 
-## example
-install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## implementations
+### python
 run the server:
    ```bash
-   python app.py
+   pip install -r python/requirements.txt
+   python python/app.py
    ```
+
+### go
+run the server:
+   ```bash
+   cd go
+   go run main.go
+   ```
+
+### rust
+run the server:
+   ```bash
+   cd rust
+   cargo run
+   ```
+
+## example
 flip a coin (requires credentials):
    ```bash
    curl -X POST http://localhost:8080/flip -u ceo:111111111111111111111
