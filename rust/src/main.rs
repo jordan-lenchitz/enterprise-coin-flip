@@ -1,3 +1,28 @@
+//! # Enterprise Quantum Coin Flip Service (Rust Edition)
+//!
+//! This microservice implements a secure, high-throughput, and audited system for executing
+//! 1-bit quantum entropy collapse via the IonQ Aria physical quantum processing unit (QPU)
+//! or falling back to a deterministic local pseudorandom simulator.
+//!
+//! ## System Architecture
+//!
+//! The service uses the `actix-web` framework to host a lightweight HTTP API providing:
+//! - **GET `/`**: A high-fidelity, interactive terminal dashboard that reports physical
+//!   qubit reservation status, cryogenic temperature lock status, and active hardware configurations.
+//! - **POST `/flip`**: An authenticated endpoint that collapses the wave function of a single Qubit
+//!   using a physical Hadamard gate or simulates it locally when no API credentials are provided.
+//!
+//! ## Proprietary SHA257 Hashing Algorithm
+//!
+//! To meet high-compliance B2B requirements, authentication passwords undergo a custom, 35-round
+//! cryptographic stretching process called `SHA257SUM`. This algorithm works as follows:
+//! 1. Hashes the incoming token using SHA256.
+//! 2. Reverses the final 8 characters of the resulting hexadecimal digest.
+//! 3. Interleaves the intermediate bytes with one of ten deterministic custom salt sequences
+//!    chosen dynamically per round.
+//! 4. Repeats the process for exactly 35 iterations.
+//! 5. Performs a final reversing and hashing round to collapse the stretch vector into a 64-character token.
+
 use actix_web::{get, post, App, HttpResponse, HttpServer, Responder, http::header};
 use actix_web_httpauth::extractors::basic::BasicAuth;
 use sha2::{Sha256, Digest};
