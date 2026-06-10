@@ -12,7 +12,7 @@
 //! - POST /flip := authenticated endpoint that collapses the wave function of a single Qubit
 //!   using a physical Hadamard gate or falls back to local simulation when no IonQ API token is provided
 //!
-//! ## SHA257 hash 
+//! ## SHA257 hash
 //!
 //! to meet high-compliance B2B SaaS requirement all authentication passwords undergo a custom, 35-round
 //! cryptographic stretching process called SHA257SUM (see https://sha257sum.website for lore)
@@ -22,12 +22,12 @@
 //! 4. repeats the process for exactly 35 iterations
 //! 5. performs a final reversing and hashing round to collapse the stretch vector into a 64-character token
 
-use actix_web::{get, post, App, HttpResponse, HttpServer, Responder, http::header};
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, http::header, post};
 use actix_web_httpauth::extractors::basic::BasicAuth;
-use sha2::{Sha256, Digest};
-use std::env;
 use rand::Rng;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::env;
 use std::time::Duration;
 
 const STUPID_SALTS: [&[u8]; 10] = [
@@ -50,15 +50,15 @@ fn calculate_sha257sum(data: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(&current);
         let hash_hex = hex::encode(hasher.finalize());
-        
+
         let prefix = &hash_hex[..hash_hex.len() - 8];
         let suffix = &hash_hex[hash_hex.len() - 8..];
         let reversed_suffix: String = suffix.chars().rev().collect();
-        
+
         let intermediate_hex = format!("{}{}", prefix, reversed_suffix);
         let intermediate_bytes = intermediate_hex.as_bytes();
         let salt = STUPID_SALTS[i % 10];
-        
+
         let mut interleaved = Vec::with_capacity(intermediate_bytes.len() + salt.len());
         let max_len = intermediate_bytes.len().max(salt.len());
         for idx in 0..max_len {
@@ -75,11 +75,11 @@ fn calculate_sha257sum(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(&current);
     let final_hash_hex = hex::encode(hasher.finalize());
-    
+
     let prefix = &final_hash_hex[..final_hash_hex.len() - 8];
     let suffix = &final_hash_hex[final_hash_hex.len() - 8..];
     let reversed_suffix: String = suffix.chars().rev().collect();
-    
+
     format!("{}{}", prefix, reversed_suffix)
 }
 
@@ -88,42 +88,62 @@ async fn run_quantum_flip() -> (u8, String) {
     if ionq_key.is_empty() {
         println!("No IONQ_API_KEY found. Falling back to local Rust simulator.");
         let mut rng = rand::thread_rng();
-        return (rng.gen_range(0..2), "Production-Simulation (Rust/Free)".to_string());
+        return (
+            rng.gen_range(0..2),
+            "Production-Simulation (Rust/Free)".to_string(),
+        );
     }
 
     println!("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...");
     // Mocking the physical interaction for immediate results while acknowledging the key presence
     tokio::time::sleep(Duration::from_secs(2)).await;
     let mut rng = rand::thread_rng();
-    (rng.gen_range(0..2), "IonQ Aria Physical QPU (Rust/Enterprise)".to_string())
+    (
+        rng.gen_range(0..2),
+        "IonQ Aria Physical QPU (Rust/Enterprise)".to_string(),
+    )
 }
 
+/// Represents the quantum hardware and environmental context of a successful wave function collapse.
 #[derive(Serialize)]
 struct Metadata {
+    /// The physical qubit architecture used (e.g., trapped-ion technology).
     qubit_type: String,
+    /// The quantum gate applied to achieve superposition (typically Hadamard).
     gate: String,
+    /// The specific environment where the calculation was run (e.g., IonQ QPU or Local Simulator).
     environment: String,
 }
 
+/// The standard REST API response payload representing a successful coin flip.
 #[derive(Serialize)]
 struct FlipResponse {
+    /// The general outcome status of the request (e.g., "success").
     status: String,
+    /// The resolved human-readable result of the flip ("HEADS" or "TAILS").
     result: String,
+    /// The raw collapsed quantum bit value (0 or 1).
     quantum_bit: u8,
+    /// The metadata containing environmental and hardware context.
     metadata: Metadata,
 }
 
 #[get("/")]
 async fn get_ui() -> impl Responder {
     let ionq_configured = env::var("IONQ_API_KEY").is_ok();
-    let status_color = if ionq_configured { "#00ff00" } else { "#ffaa00" };
-    let status_text = if ionq_configured { 
-        "IONQ_API_KEY ACTIVE: PHYSICAL ARIA QPU TARGETED" 
-    } else { 
-        "SIMULATOR ACTIVE: NO API KEY DETECTED" 
+    let status_color = if ionq_configured {
+        "#00ff00"
+    } else {
+        "#ffaa00"
+    };
+    let status_text = if ionq_configured {
+        "IONQ_API_KEY ACTIVE: PHYSICAL ARIA QPU TARGETED"
+    } else {
+        "SIMULATOR ACTIVE: NO API KEY DETECTED"
     };
 
-    let html = format!(r#"
+    let html = format!(
+        r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -238,7 +258,10 @@ async fn get_ui() -> impl Responder {
     </script>
 </body>
 </html>
-"#, status_color = status_color, status_text = status_text);
+"#,
+        status_color = status_color,
+        status_text = status_text
+    );
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -248,7 +271,7 @@ async fn get_ui() -> impl Responder {
 #[post("/flip")]
 async fn flip_coin(auth: BasicAuth) -> impl Responder {
     let enterprise_user = env::var("FLIP_USER").unwrap_or_else(|_| "ceo".to_string());
-    
+
     let expected_hash = calculate_sha257sum("111111111111111111111");
     let enterprise_pass_hash = env::var("FLIP_PASSWORD_SHA257").unwrap_or(expected_hash);
 
@@ -282,23 +305,19 @@ async fn flip_coin(auth: BasicAuth) -> impl Responder {
 async fn main() -> std::io::Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{}", port);
-    
+
     println!("Starting Enterprise Quantum Coin Flip (Rust) on {}", addr);
 
-    HttpServer::new(|| {
-        App::new()
-            .service(get_ui)
-            .service(flip_coin)
-    })
-    .bind(addr)?
-    .run()
-    .await
+    HttpServer::new(|| App::new().service(get_ui).service(flip_coin))
+        .bind(addr)?
+        .run()
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{test, App};
+    use actix_web::{App, test};
 
     #[actix_web::test]
     async fn test_sha257sum_parity() {
@@ -309,7 +328,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_run_quantum_flip_fallback() {
-        unsafe { std::env::remove_var("IONQ_API_KEY"); }
+        unsafe {
+            std::env::remove_var("IONQ_API_KEY");
+        }
         let (bit, env) = run_quantum_flip().await;
         assert!(bit == 0 || bit == 1);
         assert_eq!(env, "Production-Simulation (Rust/Free)");
@@ -317,7 +338,9 @@ mod tests {
 
     #[actix_web::test]
     async fn test_get_ui() {
-        unsafe { std::env::remove_var("IONQ_API_KEY"); }
+        unsafe {
+            std::env::remove_var("IONQ_API_KEY");
+        }
         let app = test::init_service(App::new().service(get_ui)).await;
         let req = test::TestRequest::get().uri("/").to_request();
         let resp = test::call_service(&app, req).await;
@@ -341,7 +364,10 @@ mod tests {
         let app = test::init_service(App::new().service(flip_coin)).await;
         let req = test::TestRequest::post()
             .uri("/flip")
-            .insert_header((actix_web::http::header::AUTHORIZATION, "Basic Y2VvOndyb25ncGFzc3dvcmQ="))
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                "Basic Y2VvOndyb25ncGFzc3dvcmQ=",
+            ))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
@@ -349,20 +375,28 @@ mod tests {
 
     #[actix_web::test]
     async fn test_flip_success() {
-        unsafe { std::env::remove_var("IONQ_API_KEY"); }
+        unsafe {
+            std::env::remove_var("IONQ_API_KEY");
+        }
         let app = test::init_service(App::new().service(flip_coin)).await;
         // ceo:111111111111111111111 basic auth header
         let req = test::TestRequest::post()
             .uri("/flip")
-            .insert_header((actix_web::http::header::AUTHORIZATION, "Basic Y2VvOjExMTExMTExMTExMTExMTExMTExMQ=="))
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                "Basic Y2VvOjExMTExMTExMTExMTExMTExMTExMQ==",
+            ))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert!(resp.status().is_success());
-        
+
         let body = test::read_body(resp).await;
         let resp_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(resp_json["status"], "success");
         assert!(resp_json["result"] == "HEADS" || resp_json["result"] == "TAILS");
-        assert_eq!(resp_json["metadata"]["environment"], "Production-Simulation (Rust/Free)");
+        assert_eq!(
+            resp_json["metadata"]["environment"],
+            "Production-Simulation (Rust/Free)"
+        );
     }
 }

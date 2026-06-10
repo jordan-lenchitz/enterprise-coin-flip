@@ -84,37 +84,59 @@ func runQuantumFlip() (int, string) {
 	}
 
 	fmt.Println("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...")
-	// In a real production scenario, we'd poll for completion. 
+	// In a real production scenario, we'd poll for completion.
 	// For this exercise, we'll implement the direct REST call logic.
-	// Since we can't easily wait for minutes for a real QPU job in a demo, 
+	// Since we can't easily wait for minutes for a real QPU job in a demo,
 	// we will mock the successful interaction if the key is present but technically hit the endpoint.
-	
+
 	// Real implementation would look like this:
 	/*
-	client := &http.Client{}
-	payload := []byte(`{
-		"target": "qpu.aria",
-		"shots": 1,
-		"name": "enterprise-flip-go",
-		"body": {
-			"qubits": 1,
-			"circuit": [
-				{"gate": "h", "targets": [0]},
-				{"gate": "measure", "targets": [0]}
-			]
-		}
-	}`)
-	req, _ := http.NewRequest("POST", "https://api.ionq.co/v1/jobs", bytes.NewBuffer(payload))
-	req.Header.Set("Authorization", "apiKey "+ionqKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	... poll for result ...
+		client := &http.Client{}
+		payload := []byte(`{
+			"target": "qpu.aria",
+			"shots": 1,
+			"name": "enterprise-flip-go",
+			"body": {
+				"qubits": 1,
+				"circuit": [
+					{"gate": "h", "targets": [0]},
+					{"gate": "measure", "targets": [0]}
+				]
+			}
+		}`)
+		req, _ := http.NewRequest("POST", "https://api.ionq.co/v1/jobs", bytes.NewBuffer(payload))
+		req.Header.Set("Authorization", "apiKey "+ionqKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		... poll for result ...
 	*/
 
 	// Mocking the physical interaction for immediate results while acknowledging the key presence
 	time.Sleep(2 * time.Second) // Simulate network latency
 	rand.Seed(time.Now().UnixNano())
 	return rand.Intn(2), "IonQ Aria Physical QPU (Go/Enterprise)"
+}
+
+// Metadata represents the quantum hardware and environmental context of a successful wave function collapse.
+type Metadata struct {
+	// QubitType is the physical qubit architecture used (e.g., trapped-ion technology).
+	QubitType string `json:"qubit_type"`
+	// Gate is the quantum gate applied to achieve superposition (typically Hadamard).
+	Gate string `json:"gate"`
+	// Environment is the specific environment where the calculation was run (e.g., IonQ QPU or Local Simulator).
+	Environment string `json:"environment"`
+}
+
+// FlipResponse is the standard REST API response payload representing a successful coin flip.
+type FlipResponse struct {
+	// Status is the general outcome status of the request (e.g., "success").
+	Status string `json:"status"`
+	// Result is the resolved human-readable result of the flip ("HEADS" or "TAILS").
+	Result string `json:"result"`
+	// QuantumBit is the raw collapsed quantum bit value (0 or 1).
+	QuantumBit int `json:"quantum_bit"`
+	// Metadata contains environmental and hardware context.
+	Metadata Metadata `json:"metadata"`
 }
 
 func setupRouter() *gin.Engine {
@@ -271,7 +293,7 @@ func setupRouter() *gin.Engine {
 		// Wait, basic auth is base64, not hex.
 		_ = payload
 		_ = err
-		
+
 		username, password, ok := c.Request.BasicAuth()
 		if !ok || username != enterpriseUser || calculateSHA257Sum(password) != enterprisePassHash {
 			c.Header("WWW-Authenticate", "Basic")
@@ -287,14 +309,14 @@ func setupRouter() *gin.Engine {
 		}
 		fmt.Printf("Wave function collapsed: %s on %s\n", outcome, environment)
 
-		c.JSON(http.StatusOK, gin.H{
-			"status":      "success",
-			"result":      outcome,
-			"quantum_bit": resultBit,
-			"metadata": gin.H{
-				"qubit_type":  "IonQ Aria physical trapped-ion",
-				"gate":        "Hadamard (H)",
-				"environment": environment,
+		c.JSON(http.StatusOK, FlipResponse{
+			Status:     "success",
+			Result:     outcome,
+			QuantumBit: resultBit,
+			Metadata: Metadata{
+				QubitType:   "IonQ Aria physical trapped-ion",
+				Gate:        "Hadamard (H)",
+				Environment: environment,
 			},
 		})
 	})
