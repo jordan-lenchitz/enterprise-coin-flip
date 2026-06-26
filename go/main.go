@@ -325,6 +325,7 @@ func setupRouter() *gin.Engine {
 }
 
 func main() {
+	initDB()
 	r := setupRouter()
 
 	port := os.Getenv("PORT")

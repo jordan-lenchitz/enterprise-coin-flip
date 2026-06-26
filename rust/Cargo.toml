@@ -14,3 +14,4 @@ reqwest = { version = "0.11", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 rand = "0.8"
 base64 = "0.21"
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres"] }

@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: coinflip
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d coinflip"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  python-app:
+    build:
+      context: ./python
+    profiles: ["python"]
+    environment:
+      DATABASE_URL: postgresql://admin:password@postgres:5432/coinflip
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  go-app:
+    build:
+      context: ./go
+    profiles: ["go"]
+    environment:
+      DATABASE_URL: postgresql://admin:password@postgres:5432/coinflip
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  rust-app:
+    build:
+      context: ./rust
+    profiles: ["rust"]
+    environment:
+      DATABASE_URL: postgresql://admin:password@postgres:5432/coinflip
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -303,7 +303,13 @@ async fn flip_coin(auth: BasicAuth) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:password@localhost:5432/coinflip".to_string());
+    match sqlx::PgPool::connect(&db_url).await {
+        Ok(_) => println!("Successfully connected to PostgreSQL"),
+        Err(e) => println!("Failed to connect to PostgreSQL: {}", e),
+    }
+
+    let port = env::var("PORT").unwrap_or_else(|_| "8081".to_string()); // Default to 8081 for Rust
     let addr = format!("0.0.0.0:{}", port);
 
     println!("Starting Enterprise Quantum Coin Flip (Rust) on {}", addr);
