@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"os"
@@ -84,37 +87,92 @@ func runQuantumFlip() (int, string) {
 	}
 
 	fmt.Println("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...")
-	// In a real production scenario, we'd poll for completion.
-	// For this exercise, we'll implement the direct REST call logic.
-	// Since we can't easily wait for minutes for a real QPU job in a demo,
-	// we will mock the successful interaction if the key is present but technically hit the endpoint.
-
-	// Real implementation would look like this:
-	/*
-		client := &http.Client{}
-		payload := []byte(`{
-			"target": "qpu.aria",
-			"shots": 1,
-			"name": "enterprise-flip-go",
-			"body": {
-				"qubits": 1,
-				"circuit": [
-					{"gate": "h", "targets": [0]},
-					{"gate": "measure", "targets": [0]}
-				]
+	
+	client := &http.Client{Timeout: 60 * time.Second}
+	payload := []byte(`{
+		"target": "qpu.aria",
+		"shots": 1,
+		"name": "enterprise-flip-go",
+		"body": {
+			"qubits": 1,
+			"circuit": [
+				{"gate": "h", "targets": [0]},
+				{"gate": "measure", "targets": [0]}
+			]
+		}
+	}`)
+	
+	req, _ := http.NewRequest("POST", "https://api.ionq.co/v1/jobs", bytes.NewBuffer(payload))
+	req.Header.Set("Authorization", "apiKey "+ionqKey)
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("Failed to create IonQ job: %v\n", err)
+		rand.Seed(time.Now().UnixNano())
+		return rand.Intn(2), "Error/Fallback Simulator"
+	}
+	defer resp.Body.Close()
+	
+	body, _ := io.ReadAll(resp.Body)
+	var jobRes map[string]interface{}
+	json.Unmarshal(body, &jobRes)
+	
+	jobID, ok := jobRes["id"].(string)
+	if !ok {
+		fmt.Printf("Invalid job creation response: %s\n", string(body))
+		rand.Seed(time.Now().UnixNano())
+		return rand.Intn(2), "Error/Fallback Simulator"
+	}
+	fmt.Printf("Job created! ID: %s. Physical atoms are now being manipulated...\n", jobID)
+	
+	// Poll for completion
+	for i := 0; i < 60; i++ {
+		time.Sleep(2 * time.Second)
+		pollReq, _ := http.NewRequest("GET", "https://api.ionq.co/v1/jobs/"+jobID, nil)
+		pollReq.Header.Set("Authorization", "apiKey "+ionqKey)
+		pollResp, err := client.Do(pollReq)
+		if err != nil {
+			continue
+		}
+		
+		pollBody, _ := io.ReadAll(pollResp.Body)
+		pollResp.Body.Close()
+		
+		var statusRes map[string]interface{}
+		json.Unmarshal(pollBody, &statusRes)
+		
+		if status := statusRes["status"]; status == "completed" {
+			data, dataOk := statusRes["data"].(map[string]interface{})
+			if !dataOk {
+				break
 			}
-		}`)
-		req, _ := http.NewRequest("POST", "https://api.ionq.co/v1/jobs", bytes.NewBuffer(payload))
-		req.Header.Set("Authorization", "apiKey "+ionqKey)
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		... poll for result ...
-	*/
-
-	// Mocking the physical interaction for immediate results while acknowledging the key presence
-	time.Sleep(2 * time.Second) // Simulate network latency
+			histogram, histOk := data["histogram"].(map[string]interface{})
+			if !histOk {
+				break
+			}
+			
+			// If key "1" exists and > 0, it's 1. Otherwise 0.
+			bitVal := 0
+			if _, hasOne := histogram["1"]; hasOne {
+				bitVal = 1
+			} else if _, hasZero := histogram["0"]; hasZero {
+				bitVal = 0
+			} else {
+				// Default to random if we can't parse histogram for some reason
+				rand.Seed(time.Now().UnixNano())
+				bitVal = rand.Intn(2)
+			}
+			return bitVal, "IonQ Aria Physical QPU ($12.42 Flat Fee)"
+		} else if status == "failed" || status == "canceled" {
+			fmt.Printf("IonQ job failed or was canceled: %v\n", statusRes)
+			break
+		}
+	}
+	
+	fmt.Println("Polling timed out or failed. Falling back to local simulator.")
 	rand.Seed(time.Now().UnixNano())
-	return rand.Intn(2), "IonQ Aria Physical QPU (Go/Enterprise)"
+	return rand.Intn(2), "Timeout/Fallback Simulator"
 }
 
 // Metadata represents the quantum hardware and environmental context of a successful wave function collapse.

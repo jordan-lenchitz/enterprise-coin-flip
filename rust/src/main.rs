@@ -95,12 +95,71 @@ async fn run_quantum_flip() -> (u8, String) {
     }
 
     println!("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...");
-    // Mocking the physical interaction for immediate results while acknowledging the key presence
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    let client = reqwest::Client::new();
+    let payload = serde_json::json!({
+        "target": "qpu.aria",
+        "shots": 1,
+        "name": "enterprise-flip-rust",
+        "body": {
+            "qubits": 1,
+            "circuit": [
+                {"gate": "h", "targets": [0]},
+                {"gate": "measure", "targets": [0]}
+            ]
+        }
+    });
+
+    if let Ok(resp) = client.post("https://api.ionq.co/v1/jobs")
+        .header("Authorization", format!("apiKey {}", ionq_key))
+        .json(&payload)
+        .send()
+        .await
+    {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            if let Some(id) = json["id"].as_str() {
+                println!("Job created! ID: {}. Physical atoms are now being manipulated...", id);
+                
+                for _ in 0..60 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    
+                    if let Ok(poll_resp) = client.get(&format!("https://api.ionq.co/v1/jobs/{}", id))
+                        .header("Authorization", format!("apiKey {}", ionq_key))
+                        .send()
+                        .await
+                    {
+                        if let Ok(poll_json) = poll_resp.json::<serde_json::Value>().await {
+                            if let Some(status) = poll_json["status"].as_str() {
+                                if status == "completed" {
+                                    if let Some(histogram) = poll_json["data"]["histogram"].as_object() {
+                                        if histogram.contains_key("1") {
+                                            return (1, "IonQ Aria Physical QPU ($12.42 Flat Fee)".to_string());
+                                        } else {
+                                            return (0, "IonQ Aria Physical QPU ($12.42 Flat Fee)".to_string());
+                                        }
+                                    }
+                                    break;
+                                } else if status == "failed" || status == "canceled" {
+                                    println!("IonQ job failed or was canceled: {:?}", poll_json);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                println!("Invalid job creation response: {:?}", json);
+            }
+        }
+    } else {
+        println!("Failed to create IonQ job via HTTP");
+    }
+    
+    println!("Polling timed out or failed. Falling back to local simulator.");
     let mut rng = rand::thread_rng();
     (
         rng.gen_range(0..2),
-        "IonQ Aria Physical QPU (Rust/Enterprise)".to_string(),
+        "Timeout/Fallback Simulator".to_string(),
     )
 }
 
