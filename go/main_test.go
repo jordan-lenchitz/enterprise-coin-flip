@@ -16,6 +16,11 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+func TestMain(m *testing.M) {
+	initDB()
+	os.Exit(m.Run())
+}
+
 func testBasicAuthHeader(user, pass string) string {
 	auth := user + ":" + pass
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))

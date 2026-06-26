@@ -21,3 +21,7 @@ CREATE TABLE IF NOT EXISTS ledger (
     result VARCHAR(10) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+INSERT INTO accounts (username, password_hash, webhook_url)
+VALUES ('ceo', '18bb824a4ad1f39be49cc91af302dad50e27f9af7ff17b5dade977dc3beb0a58', 'http://localhost:8080/webhook-test')
+ON CONFLICT (username) DO NOTHING;
