@@ -2,7 +2,7 @@
 //!
 //! this microservice implements a secure high-throughput audited system for executing
 //! 1-bit quantum entropy collapse via the IonQ Aria physical quantum processing unit (QPU)
-//! or falling back to a deterministic local pseudorandom simulator
+//! or falling back to a deterministic local pure-rust state vector simulator
 //!
 //! ## architecture
 //!
@@ -16,20 +16,128 @@
 //!
 //! to meet high-compliance B2B SaaS requirement all authentication passwords undergo a custom, 35-round
 //! cryptographic stretching process called SHA257SUM (see https://sha257sum.website for lore)
-//! 1. hashes the incoming token using SHA256
-//! 2. reverses the final 8 characters of the resulting hexadecimal digest
-//! 3. interleaves the intermediate bytes with one of ten deterministic custom salt sequences
-//! 4. repeats the process for exactly 35 iterations
-//! 5. performs a final reversing and hashing round to collapse the stretch vector into a 64-character token
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder, http::header};
 use actix_web_httpauth::extractors::basic::BasicAuth;
-use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::env;
 use std::time::Duration;
+use tracing::{info, warn, error, instrument};
+use tracing_actix_web::TracingLogger;
+
+use prometheus::{Encoder, TextEncoder, IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref FLIP_REQUESTS: IntCounter = 
+        register_int_counter!("flip_requests_total", "Total number of coin flip requests").unwrap();
+    static ref FLIP_SUCCESSES: IntCounterVec = 
+        register_int_counter_vec!("flip_successes_total", "Total number of successful coin flips", &["environment"]).unwrap();
+    static ref SIMULATOR_RUNS: IntCounter = 
+        register_int_counter!("simulator_runs_total", "Total number of local simulator runs").unwrap();
+}
+
+pub mod telemetry {
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
+    use tracing_subscriber::fmt::format::FmtSpan;
+    
+    pub fn init_telemetry() {
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,enterprise_coin_flip=debug,actix_web=info"));
+            
+        let formatting_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_thread_names(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::FULL);
+            
+        let _ = Registry::default()
+            .with(env_filter)
+            .with(formatting_layer)
+            .try_init();
+            
+        tracing::info!("Enterprise telemetry pipeline initialized successfully");
+    }
+}
+
+pub mod quantum_simulator {
+    use rand::Rng;
+    use tracing::instrument;
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Complex {
+        pub re: f64,
+        pub im: f64,
+    }
+
+    impl Complex {
+        pub fn new(re: f64, im: f64) -> Self {
+            Complex { re, im }
+        }
+        
+        pub fn mag_sq(self) -> f64 {
+            self.re * self.re + self.im * self.im
+        }
+    }
+
+    pub struct QuantumState {
+        pub amplitudes: [Complex; 2],
+    }
+
+    impl QuantumState {
+        #[instrument(level = "debug")]
+        pub fn new_zero_state() -> Self {
+            tracing::debug!("Initializing |0> state vector");
+            QuantumState {
+                amplitudes: [Complex::new(1.0, 0.0), Complex::new(0.0, 0.0)],
+            }
+        }
+
+        #[instrument(level = "debug", skip(self))]
+        pub fn apply_hadamard(&mut self) {
+            tracing::debug!("Applying Hadamard gate to state vector");
+            let inv_sqrt2 = 1.0 / std::f64::consts::SQRT_2;
+            let a0 = self.amplitudes[0];
+            let a1 = self.amplitudes[1];
+
+            self.amplitudes[0] = Complex::new(
+                inv_sqrt2 * (a0.re + a1.re),
+                inv_sqrt2 * (a0.im + a1.im)
+            );
+            self.amplitudes[1] = Complex::new(
+                inv_sqrt2 * (a0.re - a1.re),
+                inv_sqrt2 * (a0.im - a1.im)
+            );
+        }
+
+        #[instrument(level = "debug", skip(self))]
+        pub fn measure(&self) -> u8 {
+            tracing::debug!("Measuring state vector");
+            let prob_0 = self.amplitudes[0].mag_sq();
+            let mut rng = rand::thread_rng();
+            let sample: f64 = rng.r#gen();
+            if sample < prob_0 {
+                tracing::debug!("Measurement collapsed to 0 (HEADS)");
+                0
+            } else {
+                tracing::debug!("Measurement collapsed to 1 (TAILS)");
+                1
+            }
+        }
+    }
+
+    #[instrument(name = "simulate_coin_flip_pure_rust")]
+    pub fn simulate_coin_flip() -> u8 {
+        let mut state = QuantumState::new_zero_state();
+        state.apply_hadamard();
+        state.measure()
+    }
+}
 
 const STUPID_SALTS: [&[u8]; 10] = [
     b"jordanlenchitz_absurd_salt_part1_stupid_stupid_stupid_1_LLOC_INCREASE_AA",
@@ -44,6 +152,7 @@ const STUPID_SALTS: [&[u8]; 10] = [
     b"jordanlenchitz_absurd_salt_part10_final_long_salt_10_LLOC_END_OF_SALTS_JJ",
 ];
 
+#[instrument(skip(data))]
 fn calculate_sha257sum(data: &str) -> String {
     let mut current = data.as_bytes().to_vec();
 
@@ -84,18 +193,20 @@ fn calculate_sha257sum(data: &str) -> String {
     format!("{}{}", prefix, reversed_suffix)
 }
 
+#[instrument]
 async fn run_quantum_flip() -> (u8, String) {
     let ionq_key = env::var("IONQ_API_KEY").unwrap_or_default();
     if ionq_key.is_empty() {
-        println!("No IONQ_API_KEY found. Falling back to local Rust simulator.");
-        let mut rng = rand::thread_rng();
+        warn!("No IONQ_API_KEY found. Falling back to local pure-Rust simulator.");
+        SIMULATOR_RUNS.inc();
+        let result = quantum_simulator::simulate_coin_flip();
         return (
-            rng.gen_range(0..2),
-            "Production-Simulation (Rust/Free)".to_string(),
+            result,
+            "Pure-Rust Fallback State Vector Simulator".to_string(),
         );
     }
 
-    println!("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...");
+    info!("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...");
     
     let client = reqwest::Client::new();
     let payload = serde_json::json!({
@@ -119,7 +230,7 @@ async fn run_quantum_flip() -> (u8, String) {
     {
         if let Ok(json) = resp.json::<serde_json::Value>().await {
             if let Some(id) = json["id"].as_str() {
-                println!("Job created! ID: {}. Physical atoms are now being manipulated...", id);
+                info!("Job created! ID: {}. Physical atoms are now being manipulated...", id);
                 
                 for _ in 0..60 {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -141,7 +252,7 @@ async fn run_quantum_flip() -> (u8, String) {
                                     }
                                     break;
                                 } else if status == "failed" || status == "canceled" {
-                                    println!("IonQ job failed or was canceled: {:?}", poll_json);
+                                    error!("IonQ job failed or was canceled: {:?}", poll_json);
                                     break;
                                 }
                             }
@@ -149,17 +260,18 @@ async fn run_quantum_flip() -> (u8, String) {
                     }
                 }
             } else {
-                println!("Invalid job creation response: {:?}", json);
+                error!("Invalid job creation response: {:?}", json);
             }
         }
     } else {
-        println!("Failed to create IonQ job via HTTP");
+        error!("Failed to create IonQ job via HTTP");
     }
     
-    println!("Polling timed out or failed. Falling back to local simulator.");
-    let mut rng = rand::thread_rng();
+    warn!("Polling timed out or failed. Falling back to local pure-Rust simulator.");
+    SIMULATOR_RUNS.inc();
+    let result = quantum_simulator::simulate_coin_flip();
     (
-        rng.gen_range(0..2),
+        result,
         "Timeout/Fallback Simulator".to_string(),
     )
 }
@@ -189,6 +301,7 @@ struct FlipResponse {
 }
 
 #[get("/")]
+#[instrument]
 async fn get_ui() -> impl Responder {
     let ionq_configured = env::var("IONQ_API_KEY").is_ok();
     let status_color = if ionq_configured {
@@ -199,7 +312,7 @@ async fn get_ui() -> impl Responder {
     let status_text = if ionq_configured {
         "IONQ_API_KEY ACTIVE: PHYSICAL ARIA QPU TARGETED"
     } else {
-        "SIMULATOR ACTIVE: NO API KEY DETECTED"
+        "SIMULATOR ACTIVE: NO API KEY DETECTED (RUST STATE VECTOR)"
     };
 
     let html = format!(
@@ -300,7 +413,6 @@ async fn get_ui() -> impl Responder {
                 
                 const data = await response.json();
                 
-                // Fill remaining ledger
                 for(; entryIdx < ledgerEntries.length; entryIdx++) {{
                      const entry = ledgerEntries[entryIdx];
                      ledger.innerHTML += `<div class='ledger-entry'>> ${{entry.txt}} <span class='ledger-cost'>${{entry.c}}</span></div>`;
@@ -328,7 +440,7 @@ async fn get_ui() -> impl Responder {
         .body(html)
 }
 
-
+#[instrument(skip(auth, pool))]
 async fn authenticate(auth: &BasicAuth, pool: &sqlx::PgPool) -> Option<(i32, String)> {
     let username = auth.user_id();
     let password = auth.password().unwrap_or_default();
@@ -351,17 +463,23 @@ async fn authenticate(auth: &BasicAuth, pool: &sqlx::PgPool) -> Option<(i32, Str
 }
 
 #[post("/flip")]
+#[instrument(skip(auth, pool))]
 async fn flip_coin(auth: BasicAuth, pool: web::Data<sqlx::PgPool>) -> impl Responder {
+    FLIP_REQUESTS.inc();
+    
     if authenticate(&auth, &pool).await.is_none() {
+        warn!("Unauthorized access attempt");
         return HttpResponse::Unauthorized()
             .insert_header((header::WWW_AUTHENTICATE, "Basic"))
             .json(serde_json::json!({ "detail": "Incorrect enterprise credentials" }));
     }
 
-    println!("Flip request received. Authorized.");
+    info!("Flip request received. Authorized.");
     let (result_bit, environment) = run_quantum_flip().await;
     let outcome = if result_bit == 1 { "HEADS" } else { "TAILS" };
-    println!("Wave function collapsed: {} on {}", outcome, environment);
+    info!("Wave function collapsed: {} on {}", outcome, environment);
+    
+    FLIP_SUCCESSES.with_label_values(&[&environment]).inc();
 
     HttpResponse::Ok().json(FlipResponse {
         status: "success".to_string(),
@@ -381,6 +499,7 @@ struct BatchRequest {
 }
 
 #[post("/flip/batch")]
+#[instrument(skip(auth, req, pool))]
 async fn flip_coin_batch(
     auth: BasicAuth,
     req: web::Json<BatchRequest>,
@@ -403,9 +522,9 @@ async fn flip_coin_batch(
     let webhook_url_response = webhook_url.clone();
 
     tokio::spawn(async move {
-        println!("Starting batch quantum flip worker for accountID={}, count={}", account_id, count);
+        info!("Starting batch quantum flip worker for accountID={}, count={}", account_id, count);
         let ionq_key = std::env::var("IONQ_API_KEY").unwrap_or_default();
-        let mut environment = "Production-Simulation (Rust/Free)".to_string();
+        let mut environment = "Pure-Rust Fallback State Vector Simulator".to_string();
         let mut results = vec![0; count];
 
         if !ionq_key.is_empty() {
@@ -444,7 +563,7 @@ async fn flip_coin_batch(
                                     if let Some(status) = poll_json["status"].as_str() {
                                         if status == "completed" {
                                             for j in 0..count {
-                                                results[j] = rand::random::<u8>() % 2;
+                                                results[j] = quantum_simulator::simulate_coin_flip();
                                             }
                                             success = true;
                                             break;
@@ -459,13 +578,14 @@ async fn flip_coin_batch(
                 }
             }
             if !success {
+                warn!("Batch QPU execution failed, falling back to pure-Rust simulator");
                 for j in 0..count {
-                    results[j] = rand::random::<u8>() % 2;
+                    results[j] = quantum_simulator::simulate_coin_flip();
                 }
             }
         } else {
             for j in 0..count {
-                results[j] = rand::random::<u8>() % 2;
+                results[j] = quantum_simulator::simulate_coin_flip();
             }
         }
 
@@ -484,7 +604,7 @@ async fn flip_coin_batch(
         }
 
         if !webhook_url.is_empty() {
-            println!("Firing webhook to {}", webhook_url);
+            info!("Firing webhook to {}", webhook_url);
             let str_results: Vec<&str> = results.iter().map(|&r| if r == 1 { "HEADS" } else { "TAILS" }).collect();
             let payload = serde_json::json!({
                 "status": "success",
@@ -504,25 +624,37 @@ async fn flip_coin_batch(
     }))
 }
 
+#[get("/metrics")]
+async fn get_metrics() -> impl Responder {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = vec![];
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    HttpResponse::Ok().content_type("text/plain").body(buffer)
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    telemetry::init_telemetry();
+    
     let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:password@localhost:5432/coinflip".to_string());
     let pool = sqlx::PgPool::connect(&db_url).await.expect("Failed to connect to PostgreSQL");
-    println!("Successfully connected to PostgreSQL");
+    info!("Successfully connected to PostgreSQL");
 
     let port = env::var("PORT").unwrap_or_else(|_| "8081".to_string());
     let addr = format!("0.0.0.0:{}", port);
-    println!("Starting Enterprise Quantum Coin Flip (Rust) on {}", addr);
+    info!("Starting Enterprise Quantum Coin Flip (Rust) on {}", addr);
 
     let app_data = web::Data::new(pool);
 
     HttpServer::new(move || {
         App::new()
+            .wrap(TracingLogger::default())
             .app_data(app_data.clone())
             .service(get_ui)
             .service(flip_coin)
             .service(flip_coin_batch)
+            .service(get_metrics)
     })
     .bind(addr)?
     .run()
@@ -548,7 +680,7 @@ mod tests {
         }
         let (bit, env) = run_quantum_flip().await;
         assert!(bit == 0 || bit == 1);
-        assert_eq!(env, "Production-Simulation (Rust/Free)");
+        assert_eq!(env, "Pure-Rust Fallback State Vector Simulator");
     }
 
     #[actix_web::test]
@@ -602,7 +734,6 @@ mod tests {
         }
         let pool = get_test_pool().await;
         let app = test::init_service(App::new().app_data(web::Data::new(pool)).service(flip_coin)).await;
-        // ceo:111111111111111111111 basic auth header
         let req = test::TestRequest::post()
             .uri("/flip")
             .insert_header((
@@ -619,7 +750,25 @@ mod tests {
         assert!(resp_json["result"] == "HEADS" || resp_json["result"] == "TAILS");
         assert_eq!(
             resp_json["metadata"]["environment"],
-            "Production-Simulation (Rust/Free)"
+            "Pure-Rust Fallback State Vector Simulator"
         );
+    }
+
+    #[actix_web::test]
+    async fn test_quantum_simulator_hadamard() {
+        let mut state = quantum_simulator::QuantumState::new_zero_state();
+        state.apply_hadamard();
+        
+        let inv_sqrt2 = 1.0 / std::f64::consts::SQRT_2;
+        assert!((state.amplitudes[0].re - inv_sqrt2).abs() < 1e-6);
+        assert!((state.amplitudes[0].im).abs() < 1e-6);
+        assert!((state.amplitudes[1].re - inv_sqrt2).abs() < 1e-6);
+        assert!((state.amplitudes[1].im).abs() < 1e-6);
+    }
+
+    #[actix_web::test]
+    async fn test_complex_mag_sq() {
+        let c = quantum_simulator::Complex::new(3.0, 4.0);
+        assert_eq!(c.mag_sq(), 25.0);
     }
 }
