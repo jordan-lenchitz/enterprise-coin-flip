@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  DATABASE_URL: "postgres://admin:password@localhost:5432/coinflip"
+  DATABASE_URL: "postgres://admin:password@localhost:5432/coinflip?sslmode=disable"
 
 jobs:
   test-go:

@@ -1,0 +1,146 @@
+openapi: 3.0.3
+info:
+  title: enterprise quantum coin flip service
+  description: secure, authenticated b2b solution for true quantum bit collapse.
+  version: 1.1.0
+servers:
+  - url: http://localhost:8080
+    description: local python server
+  - url: http://localhost:8081
+    description: local rust server
+  - url: http://localhost:8082
+    description: local go server
+paths:
+  /:
+    get:
+      summary: get the ui dashboard
+      description: returns an interactive html dashboard that reports physical qubit reservation status and cryogenic temperature lock status.
+      responses:
+        '200':
+          description: html dashboard
+          content:
+            text/html:
+              schema:
+                type: string
+  /flip:
+    post:
+      summary: flip a quantum coin
+      description: authenticated endpoint that collapses the wave function of a single qubit using a physical hadamard gate or falls back to local simulation when no ionq api token is provided.
+      security:
+        - basicAuth: []
+      responses:
+        '200':
+          description: successful wave function collapse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlipResponse'
+        '401':
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: hardware/simulator error
+  /flip/batch:
+    post:
+      summary: batch flip quantum coins
+      description: authenticated endpoint that submits a batch of quantum flips to be executed asynchronously, saving results to the ledger and sending a webhook payload when complete.
+      security:
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchRequest'
+      responses:
+        '202':
+          description: batch queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+        '400':
+          description: invalid request (e.g., count not between 1 and 1000)
+        '401':
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: enterprise credentials required. password must match the 35-iteration sha257 hashed password stored in the database.
+  schemas:
+    FlipResponse:
+      type: object
+      required:
+        - status
+        - result
+        - quantum_bit
+        - metadata
+      properties:
+        status:
+          type: string
+          example: success
+        result:
+          type: string
+          enum: [HEADS, TAILS]
+        quantum_bit:
+          type: integer
+          enum: [0, 1]
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+    Metadata:
+      type: object
+      required:
+        - qubit_type
+        - gate
+        - environment
+      properties:
+        qubit_type:
+          type: string
+          example: ionq aria physical trapped-ion
+        gate:
+          type: string
+          example: hadamard (h)
+        environment:
+          type: string
+          example: ionq aria physical qpu ($12.42 flat fee)
+    BatchRequest:
+      type: object
+      required:
+        - count
+      properties:
+        count:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          example: 100
+    BatchResponse:
+      type: object
+      required:
+        - status
+        - message
+        - webhook_target
+      properties:
+        status:
+          type: string
+          example: accepted
+        message:
+          type: string
+          example: batch quantum flip for 100 wave functions queued.
+        webhook_target:
+          type: string
+          example: http://example.com/webhook
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          example: incorrect enterprise credentials
