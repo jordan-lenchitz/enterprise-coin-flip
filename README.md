@@ -11,24 +11,9 @@ a B2B SaaS-ready microservice that flips a coin using actual quantum math via Io
 - **restful api** interface with the usual openAPI docs
 
 ## implementations
-### python
-run the server:
-   ```bash
-   pip install -r python/requirements.txt
-   python python/app.py
-   ```
-
-### go
-run the server:
-   ```bash
-   cd go
-   go run main.go
-   ```
-
 ### rust
 run the server:
    ```bash
-   cd rust
    cargo run
    ```
 
