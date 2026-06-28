@@ -1,4 +1,4 @@
-//! # enterprise coin flip (rust edition)
+//! enterprise coin flip 
 //!
 //! this microservice implements a secure high-throughput audited system for executing
 //! 1-bit quantum entropy collapse via the IonQ Aria physical quantum processing unit (QPU)
