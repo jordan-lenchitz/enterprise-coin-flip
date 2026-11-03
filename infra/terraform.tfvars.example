@@ -1,0 +1,9 @@
+project_id            = "my-gcp-project-id"
+region                = "us-central1"
+service_name          = "quantum-coin-flip"
+container_image       = "us-central1-docker.pkg.dev/my-gcp-project-id/quantum-coin-flip/enterprise-coin-flip:latest"
+db_tier               = "db-f1-micro"
+db_name               = "coinflip"
+db_user               = "admin"
+ionq_api_key          = ""
+allow_unauthenticated = true
