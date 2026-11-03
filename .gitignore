@@ -1,13 +1,7 @@
 # Environments
 .env
-.venv
 env/
-venv/
 ENV/
-env.bak/
-venv.bak/
-
-
 
 # Rust
 /target/
@@ -44,6 +38,3 @@ docker-compose.override.yml
 # Logs
 logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*

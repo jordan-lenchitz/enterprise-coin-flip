@@ -1,4 +1,4 @@
-.PHONY: run-rust test-rust db-up db-down db-migrate
+.PHONY: run test db-up db-down db-migrate
 
 db-up:
 	docker compose up -d postgres
@@ -9,8 +9,8 @@ db-down:
 db-migrate:
 	docker compose exec postgres psql -U admin -d coinflip -f /docker-entrypoint-initdb.d/init.sql
 
-run-rust:
-	docker compose --profile rust up --build
+run:
+	docker compose up --build
 
-test-rust:
+test:
 	cargo test

@@ -632,6 +632,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "enterprise-coin-flip"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "actix-web-httpauth",
+ "base64 0.21.7",
+ "hex",
+ "lazy_static",
+ "opentelemetry",
+ "opentelemetry-prometheus",
+ "opentelemetry_sdk",
+ "prometheus",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-actix-web",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1730,32 +1756,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "winreg",
-]
-
-[[package]]
-name = "rust"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "actix-web-httpauth",
- "base64 0.21.7",
- "hex",
- "lazy_static",
- "opentelemetry",
- "opentelemetry-prometheus",
- "opentelemetry_sdk",
- "prometheus",
- "rand 0.8.6",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-actix-web",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]

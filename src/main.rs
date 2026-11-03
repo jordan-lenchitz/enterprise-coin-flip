@@ -22,9 +22,9 @@ async fn main() -> std::io::Result<()> {
     let pool = sqlx::PgPool::connect(&db_url).await.expect("Failed to connect to PostgreSQL");
     info!("Successfully connected to PostgreSQL");
 
-    let port = env::var("PORT").unwrap_or_else(|_| "8081".to_string());
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{}", port);
-    info!("Starting Enterprise Quantum Coin Flip (Rust) on {}", addr);
+    info!("Starting Enterprise Quantum Coin Flip on {}", addr);
 
     let app_data = web::Data::new(pool);
 

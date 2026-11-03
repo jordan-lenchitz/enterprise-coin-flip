@@ -5,11 +5,7 @@ info:
   version: 1.1.0
 servers:
   - url: http://localhost:8080
-    description: local python server
-  - url: http://localhost:8081
-    description: local rust server
-  - url: http://localhost:8082
-    description: local go server
+    description: local server
 paths:
   /:
     get:

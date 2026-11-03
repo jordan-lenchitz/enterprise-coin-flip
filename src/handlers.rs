@@ -39,7 +39,7 @@ pub async fn run_quantum_flip() -> (u8, String) {
     let payload = serde_json::json!({
         "target": "qpu.aria",
         "shots": 1,
-        "name": "enterprise-flip-rust",
+        "name": "enterprise-flip",
         "body": {
             "qubits": 1,
             "circuit": [
@@ -351,7 +351,7 @@ pub async fn flip_coin_batch(
             let payload = serde_json::json!({
                 "target": "qpu.aria",
                 "shots": count,
-                "name": "enterprise-flip-rust-batch",
+                "name": "enterprise-flip-batch",
                 "body": {
                     "qubits": 1,
                     "circuit": [

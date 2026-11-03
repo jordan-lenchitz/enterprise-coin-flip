@@ -10,8 +10,8 @@ env:
   DATABASE_URL: "postgresql://admin:password@localhost:5432/coinflip?sslmode=disable"
 
 jobs:
-  test-rust:
-    name: Test Rust Service
+  test:
+    name: Test Service
     runs-on: ubuntu-latest
     services:
       postgres:

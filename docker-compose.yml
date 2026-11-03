@@ -18,14 +18,13 @@ services:
       timeout: 5s
       retries: 5
 
-  rust-app:
+  app:
     build:
       context: .
-    profiles: ["rust"]
     environment:
       DATABASE_URL: postgresql://admin:password@postgres:5432/coinflip
     ports:
-      - "8081:8081"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
