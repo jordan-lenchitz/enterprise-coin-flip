@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:15
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: password
@@ -33,12 +33,6 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Seed Database
-        run: PGPASSWORD=password psql -h localhost -U admin -d coinflip -f db/init.sql
 
       - name: Cache Cargo Dependencies
         uses: actions/cache@v5

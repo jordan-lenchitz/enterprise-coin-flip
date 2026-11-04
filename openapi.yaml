@@ -66,6 +66,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /metrics:
+    get:
+      summary: get prometheus metrics
+      description: returns prometheus text-format telemetry counters for flip requests, successes by environment, and simulator fallback runs.
+      responses:
+        '200':
+          description: prometheus metrics payload
+          content:
+            text/plain:
+              schema:
+                type: string
 components:
   securitySchemes:
     basicAuth:

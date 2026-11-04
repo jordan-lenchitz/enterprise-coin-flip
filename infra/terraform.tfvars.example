@@ -7,3 +7,5 @@ db_name               = "coinflip"
 db_user               = "admin"
 ionq_api_key          = ""
 allow_unauthenticated = true
+min_instance_count    = 0
+max_instance_count    = 5

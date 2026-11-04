@@ -50,3 +50,15 @@ variable "allow_unauthenticated" {
   type        = bool
   default     = true
 }
+
+variable "min_instance_count" {
+  description = "Minimum number of Cloud Run container instances"
+  type        = number
+  default     = 0
+}
+
+variable "max_instance_count" {
+  description = "Maximum number of Cloud Run container instances"
+  type        = number
+  default     = 5
+}

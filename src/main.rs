@@ -14,6 +14,13 @@ use std::env;
 use tracing::info;
 use tracing_actix_web::TracingLogger;
 
+pub async fn init_db(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(include_str!("../db/init.sql"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     telemetry::init_telemetry();
@@ -21,6 +28,9 @@ async fn main() -> std::io::Result<()> {
     let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:password@localhost:5432/coinflip".to_string());
     let pool = sqlx::PgPool::connect(&db_url).await.expect("Failed to connect to PostgreSQL");
     info!("Successfully connected to PostgreSQL");
+
+    init_db(&pool).await.expect("Failed to initialize database schema");
+    info!("Database schema verified");
 
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{}", port);
@@ -73,8 +83,14 @@ mod tests {
     }
 
     async fn get_test_pool() -> sqlx::PgPool {
+        static INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
         let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:password@localhost:5432/coinflip".to_string());
-        sqlx::PgPool::connect(&db_url).await.unwrap()
+        let pool = sqlx::PgPool::connect(&db_url).await.unwrap();
+        INIT.get_or_init(|| async {
+            crate::init_db(&pool).await.unwrap();
+        })
+        .await;
+        pool
     }
 
     #[actix_web::test]

@@ -32,7 +32,7 @@ docker run -p 8080:8080 quantum-flip
 ```
 
 ### infrastructure (opentofu / terraform)
-declarative google cloud provisioning (cloud run v2, cloud sql postgresql 15, secret manager, and artifact registry) lives in [`infra/`](infra/) and works with both **OpenTofu** (`tofu`) and **Terraform** (`terraform`):
+declarative google cloud provisioning (cloud run v2, cloud sql postgresql 16, secret manager, and artifact registry) lives in [`infra/`](infra/) and works with both **OpenTofu** (`tofu`) and **Terraform** (`terraform`):
 
 ```bash
 cp infra/terraform.tfvars.example infra/terraform.tfvars
@@ -42,4 +42,4 @@ make infra-init
 make infra-plan
 make infra-apply
 ```
-after provisioning the database, seed the schema (`db/init.sql`) against your Cloud SQL instance before invoking `/flip`.
+the service automatically initializes its database schema (`db/init.sql`) on startup.

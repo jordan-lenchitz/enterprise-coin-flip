@@ -31,7 +31,7 @@ resource "random_password" "db_password" {
 
 resource "google_sql_database_instance" "postgres" {
   name                = "${var.service_name}-pg"
-  database_version    = "POSTGRES_15"
+  database_version    = "POSTGRES_16"
   region              = var.region
   deletion_protection = false
 
@@ -116,6 +116,11 @@ resource "google_cloud_run_v2_service" "app" {
   template {
     service_account = google_service_account.cloud_run.email
 
+    scaling {
+      min_instance_count = var.min_instance_count
+      max_instance_count = var.max_instance_count
+    }
+
     volumes {
       name = "cloudsql"
 
@@ -129,6 +134,28 @@ resource "google_cloud_run_v2_service" "app" {
 
       ports {
         container_port = 8080
+      }
+
+      startup_probe {
+        http_get {
+          path = "/"
+          port = 8080
+        }
+        initial_delay_seconds = 0
+        timeout_seconds       = 3
+        period_seconds        = 5
+        failure_threshold     = 3
+      }
+
+      liveness_probe {
+        http_get {
+          path = "/"
+          port = 8080
+        }
+        initial_delay_seconds = 10
+        timeout_seconds       = 3
+        period_seconds        = 15
+        failure_threshold     = 3
       }
 
       resources {

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: public.ecr.aws/docker/library/postgres:15
+    image: public.ecr.aws/docker/library/postgres:16
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
