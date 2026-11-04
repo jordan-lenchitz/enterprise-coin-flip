@@ -450,3 +450,40 @@ pub async fn get_metrics() -> impl Responder {
     encoder.encode(&metric_families, &mut buffer).unwrap();
     HttpResponse::Ok().content_type("text/plain").body(buffer)
 }
+
+#[get("/healthz")]
+pub async fn healthz() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "alive"
+    }))
+}
+
+#[get("/readyz")]
+#[instrument(skip(pool))]
+pub async fn readyz(pool: web::Data<sqlx::PgPool>) -> impl Responder {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query("SELECT 1").execute(pool.get_ref()),
+    )
+    .await
+    {
+        Ok(Ok(_)) => HttpResponse::Ok().json(serde_json::json!({
+            "status": "ready",
+            "database": "connected"
+        })),
+        Ok(Err(e)) => {
+            warn!("Readiness probe database check failed: {}", e);
+            HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "status": "not_ready",
+                "database": "unreachable"
+            }))
+        }
+        Err(_) => {
+            warn!("Readiness probe database check timed out");
+            HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "status": "not_ready",
+                "database": "timeout"
+            }))
+        }
+    }
+}

@@ -46,6 +46,8 @@ async fn main() -> std::io::Result<()> {
             .service(handlers::flip_coin)
             .service(handlers::flip_coin_batch)
             .service(handlers::get_metrics)
+            .service(handlers::healthz)
+            .service(handlers::readyz)
     })
     .bind(addr)?
     .run()
@@ -142,5 +144,34 @@ mod tests {
             resp_json["metadata"]["environment"],
             "Pure-Rust Fallback State Vector Simulator"
         );
+    }
+
+    #[actix_web::test]
+    async fn test_healthz() {
+        let app = test::init_service(App::new().service(crate::handlers::healthz)).await;
+        let req = test::TestRequest::get().uri("/healthz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body = test::read_body(resp).await;
+        let resp_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp_json["status"], "alive");
+    }
+
+    #[actix_web::test]
+    async fn test_readyz() {
+        let pool = get_test_pool().await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .service(crate::handlers::readyz),
+        )
+        .await;
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body = test::read_body(resp).await;
+        let resp_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp_json["status"], "ready");
+        assert_eq!(resp_json["database"], "connected");
     }
 }

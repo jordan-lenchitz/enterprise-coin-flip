@@ -1,9 +1,13 @@
 locals {
   required_apis = toset([
     "artifactregistry.googleapis.com",
+    "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
+    "monitoring.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
     "sqladmin.googleapis.com",
+    "sts.googleapis.com",
   ])
 }
 
@@ -138,7 +142,7 @@ resource "google_cloud_run_v2_service" "app" {
 
       startup_probe {
         http_get {
-          path = "/"
+          path = "/readyz"
           port = 8080
         }
         initial_delay_seconds = 0
@@ -149,7 +153,7 @@ resource "google_cloud_run_v2_service" "app" {
 
       liveness_probe {
         http_get {
-          path = "/"
+          path = "/healthz"
           port = 8080
         }
         initial_delay_seconds = 10

@@ -62,3 +62,9 @@ variable "max_instance_count" {
   type        = number
   default     = 5
 }
+
+variable "github_repository" {
+  description = "GitHub repository (owner/repo) allowed to authenticate via Workload Identity Federation"
+  type        = string
+  default     = "jordan-lenchitz/enterprise-coin-flip"
+}

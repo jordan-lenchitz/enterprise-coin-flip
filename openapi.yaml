@@ -77,6 +77,52 @@ paths:
             text/plain:
               schema:
                 type: string
+  /healthz:
+    get:
+      summary: liveness probe
+      description: lightweight process liveness check that verifies the http server and event loop are responsive without querying external dependencies.
+      responses:
+        '200':
+          description: process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: alive
+  /readyz:
+    get:
+      summary: readiness probe
+      description: deep readiness check that verifies active database pool connectivity (select 1) within a 2-second timeout before routing traffic.
+      responses:
+        '200':
+          description: service and database pool are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  database:
+                    type: string
+                    example: connected
+        '503':
+          description: database unreachable or timed out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                  database:
+                    type: string
+                    example: unreachable
 components:
   securitySchemes:
     basicAuth:
