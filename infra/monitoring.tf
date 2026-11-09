@@ -94,3 +94,33 @@ resource "google_monitoring_alert_policy" "availability_fast_burn" {
     }
   }
 }
+
+resource "google_monitoring_alert_policy" "iam_authz_spike" {
+  display_name = "${var.service_name} - IAM OIDC/SCIM 401 & 403 Spike Alert"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Elevated 4xx IAM Authentication/Authorization Denials"
+
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"run.googleapis.com/request_count\"",
+        "resource.type=\"cloud_run_revision\"",
+        "resource.label.\"service_name\"=\"${google_cloud_run_v2_service.app.name}\"",
+        "metric.label.\"response_code_class\"=\"4xx\"",
+      ])
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 25.0
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_RATE"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+}

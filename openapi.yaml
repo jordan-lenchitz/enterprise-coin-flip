@@ -23,6 +23,7 @@ paths:
       summary: flip a quantum coin
       description: authenticated endpoint that collapses the wave function of a single qubit using a physical hadamard gate or falls back to local simulation when no ionq api token is provided.
       security:
+        - bearerAuth: []
         - basicAuth: []
       responses:
         '200':
@@ -32,7 +33,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/FlipResponse'
         '401':
-          description: unauthorized
+          description: unauthorized (missing or invalid OIDC JWT / Basic credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: forbidden by Hybrid RBAC/ABAC policy or SCIM Leaver revocation
           content:
             application/json:
               schema:
@@ -42,8 +49,9 @@ paths:
   /flip/batch:
     post:
       summary: batch flip quantum coins
-      description: authenticated endpoint that submits a batch of quantum flips to be executed asynchronously, saving results to the ledger and sending a webhook payload when complete.
+      description: authenticated endpoint that evaluates RBAC/ABAC batch shot quotas and submits a batch of quantum flips asynchronously.
       security:
+        - bearerAuth: []
         - basicAuth: []
       requestBody:
         required: true
@@ -123,12 +131,76 @@ paths:
                   database:
                     type: string
                     example: unreachable
+  /oauth2/token:
+    post:
+      summary: issue demo OIDC access token
+      description: issues a signed OIDC Bearer JWT for Okta Workforce ('executive', 'analyst', 'scim_admin') or Auth0 B2B CIAM ('b2b_partner') personas.
+      responses:
+        '200':
+          description: signed OIDC Bearer token and claims
+  /scim/v2/Users:
+    get:
+      summary: list SCIM 2.0 users
+      description: returns RFC 7644 SCIM 2.0 ListResponse of provisioned accounts, supporting userName eq filter.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: SCIM 2.0 ListResponse
+    post:
+      summary: provision Joiner via SCIM 2.0
+      description: provisions or updates an enterprise account from Workday/Okta Lifecycle Management and logs a SCIM_JOINER_PROVISIONED audit event.
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: SCIM 2.0 User created
+  /scim/v2/Users/{id}:
+    patch:
+      summary: update Mover or Leaver via SCIM 2.0 PatchOp
+      description: applies SCIM 2.0 PatchOp transitions for Mover department/role/costCenter changes or Leaver active=false soft-deprovisioning.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: updated SCIM 2.0 User
+    delete:
+      summary: soft-deprovision Leaver via SCIM 2.0
+      description: marks account active=false, revokes in-flight OIDC tokens immediately, and preserves SOC 2 ledger history.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: soft-deprovisioned
+  /governance/access-review:
+    get:
+      summary: Okta Identity Governance (OIG) access review report
+      description: returns all accounts, RBAC/ABAC entitlements, cumulative QPU ledger spend, SoD compliance findings, and recent JML audit logs.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OIG access review report
+  /governance/certify:
+    post:
+      summary: submit OIG access certification decision
+      description: records an APPROVE or REVOKE decision for an account and automatically strips QPU entitlements on REVOKE.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: certification recorded
 components:
   securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: OIDC Bearer JWT issued by Okta Workforce, Auth0 B2B CIAM, or /oauth2/token, or SCIM provisioning bearer token.
     basicAuth:
       type: http
       scheme: basic
-      description: enterprise credentials required. password must match the 35-iteration sha257 hashed password stored in the database.
+      description: enterprise break-glass credentials required. password must match the 35-iteration sha257 hashed password stored in the database.
   schemas:
     FlipResponse:
       type: object

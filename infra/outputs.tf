@@ -27,3 +27,18 @@ output "ci_deployer_service_account" {
   description = "The email of the CI Deployer Service Account for main-branch deployments"
   value       = google_service_account.ci_deployer.email
 }
+
+output "okta_oauth_client_id" {
+  description = "The Okta Workforce OIDC Client ID for Enterprise Quantum Coin Flip"
+  value       = okta_app_oauth.quantum_coin_flip.client_id
+}
+
+output "okta_auth_server_issuer" {
+  description = "The Okta Workforce Authorization Server Issuer URI"
+  value       = okta_auth_server.quantum_authz.issuer
+}
+
+output "auth0_b2b_client_id" {
+  description = "The Auth0 B2B CIAM Client ID for external reinsurance partners"
+  value       = auth0_client.b2b_partner_client.client_id
+}

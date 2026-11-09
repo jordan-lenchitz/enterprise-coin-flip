@@ -68,3 +68,41 @@ variable "github_repository" {
   type        = string
   default     = "jordan-lenchitz/enterprise-coin-flip"
 }
+
+variable "okta_org_name" {
+  description = "Okta Workforce Identity organization subdomain (e.g. 'jordanlenchitz')"
+  type        = string
+  default     = "jordanlenchitz"
+}
+
+variable "okta_base_url" {
+  description = "Okta base domain (okta.com, oktapreview.com, or okta-emea.com)"
+  type        = string
+  default     = "okta.com"
+}
+
+variable "okta_api_token" {
+  description = "Okta SSWS API token or OAuth 2.0 private key token for Terraform IAM management"
+  type        = string
+  default     = "placeholder-ssws-token"
+  sensitive   = true
+}
+
+variable "auth0_domain" {
+  description = "Auth0 Customer Identity (CIAM) tenant domain for B2B partner federation"
+  type        = string
+  default     = "identity.jordanlenchitz.com"
+}
+
+variable "auth0_client_id" {
+  description = "Auth0 Machine-to-Machine Terraform management client ID"
+  type        = string
+  default     = "placeholder-auth0-client-id"
+}
+
+variable "auth0_client_secret" {
+  description = "Auth0 Machine-to-Machine Terraform management client secret"
+  type        = string
+  default     = "placeholder-auth0-client-secret"
+  sensitive   = true
+}

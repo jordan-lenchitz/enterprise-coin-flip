@@ -1,4 +1,4 @@
-use actix_web::{get, post, web, HttpResponse, Responder, http::header};
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder, http::header};
 use actix_web_httpauth::extractors::basic::BasicAuth;
 use prometheus::{Encoder, TextEncoder, IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
 use lazy_static::lazy_static;
@@ -9,6 +9,7 @@ use std::time::Duration;
 use tracing::{info, warn, error, instrument};
 
 use crate::crypto::calculate_sha257sum;
+use crate::iam::{self, AuthError};
 use crate::quantum_simulator;
 
 lazy_static! {
@@ -22,6 +23,21 @@ lazy_static! {
 
 #[instrument]
 pub async fn run_quantum_flip() -> (u8, String) {
+    run_quantum_flip_with_policy(true).await
+}
+
+#[instrument]
+pub async fn run_quantum_flip_with_policy(allow_hardware_qpu: bool) -> (u8, String) {
+    if !allow_hardware_qpu {
+        info!("ABAC policy restricted principal to local simulator tier ($0.00 cost-control).");
+        SIMULATOR_RUNS.inc();
+        let result = quantum_simulator::simulate_coin_flip();
+        return (
+            result,
+            "Pure-Rust Fallback State Vector Simulator".to_string(),
+        );
+    }
+
     let ionq_key = env::var("IONQ_API_KEY").unwrap_or_default();
     if ionq_key.is_empty() {
         warn!("No IONQ_API_KEY found. Falling back to local pure-Rust simulator.");
@@ -108,6 +124,14 @@ pub struct Metadata {
     pub qubit_type: String,
     pub gate: String,
     pub environment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idp_issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_tier: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -281,23 +305,76 @@ pub async fn authenticate(auth: &BasicAuth, pool: &sqlx::PgPool) -> Option<(i32,
 }
 
 #[post("/flip")]
-#[instrument(skip(auth, pool))]
-pub async fn flip_coin(auth: BasicAuth, pool: web::Data<sqlx::PgPool>) -> impl Responder {
+#[instrument(skip(req, pool))]
+pub async fn flip_coin(req: HttpRequest, pool: web::Data<sqlx::PgPool>) -> impl Responder {
     FLIP_REQUESTS.inc();
-    
-    if authenticate(&auth, &pool).await.is_none() {
-        warn!("Unauthorized access attempt");
-        return HttpResponse::Unauthorized()
-            .insert_header((header::WWW_AUTHENTICATE, "Basic"))
-            .json(serde_json::json!({ "detail": "Incorrect enterprise credentials" }));
+
+    let principal = match iam::resolve_principal(&req, &pool).await {
+        Ok(p) => p,
+        Err(AuthError::MissingCredentials) | Err(AuthError::InvalidCredentials(_)) => {
+            warn!("Unauthorized access attempt");
+            return HttpResponse::Unauthorized()
+                .insert_header((header::WWW_AUTHENTICATE, "Bearer realm=\"okta-auth0\", Basic realm=\"enterprise-breakglass\""))
+                .json(serde_json::json!({ "detail": "Incorrect enterprise credentials" }));
+        }
+        Err(AuthError::DeprovisionedAccount(msg)) => {
+            warn!("Revoked leaver access attempt: {}", msg);
+            return HttpResponse::Forbidden()
+                .json(serde_json::json!({
+                    "detail": msg,
+                    "policy_layer": "scim_lifecycle_revocation"
+                }));
+        }
+    };
+
+    let require_hardware_qpu = req
+        .headers()
+        .get("X-Require-Hardware-QPU")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    let policy = iam::evaluate_flip_policy(&principal, 1, require_hardware_qpu);
+    if !policy.allowed {
+        iam::record_iam_audit_event(
+            &pool,
+            Some(principal.account_id),
+            &principal.username,
+            "IAM_POLICY_DENY",
+            "AUTHZ",
+            &policy.decision_reason,
+        )
+        .await;
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "detail": policy.decision_reason,
+            "policy_tier": policy.policy_tier
+        }));
     }
 
-    info!("Flip request received. Authorized.");
-    let (result_bit, environment) = run_quantum_flip().await;
+    info!(
+        "Flip request authorized for principal='{}' via {} (tier='{}')",
+        principal.username, principal.auth_method, policy.policy_tier
+    );
+    let (result_bit, environment) = run_quantum_flip_with_policy(policy.allow_hardware_qpu).await;
     let outcome = if result_bit == 1 { "HEADS" } else { "TAILS" };
     info!("Wave function collapsed: {} on {}", outcome, environment);
-    
+
     FLIP_SUCCESSES.with_label_values(&[&environment]).inc();
+
+    let flip_cost = if environment.contains("Physical QPU") {
+        12.42
+    } else {
+        0.0
+    };
+    let _ = sqlx::query(
+        "INSERT INTO ledger (account_id, environment, cost, result) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(principal.account_id)
+    .bind(&environment)
+    .bind(flip_cost)
+    .bind(outcome)
+    .execute(pool.get_ref())
+    .await;
 
     HttpResponse::Ok().json(FlipResponse {
         status: "success".to_string(),
@@ -307,6 +384,10 @@ pub async fn flip_coin(auth: BasicAuth, pool: web::Data<sqlx::PgPool>) -> impl R
             qubit_type: "IonQ Aria physical trapped-ion".to_string(),
             gate: "Hadamard (H)".to_string(),
             environment,
+            principal: Some(principal.username),
+            auth_method: Some(principal.auth_method),
+            idp_issuer: Some(principal.issuer),
+            policy_tier: Some(policy.policy_tier),
         },
     })
 }
@@ -317,35 +398,74 @@ pub struct BatchRequest {
 }
 
 #[post("/flip/batch")]
-#[instrument(skip(auth, req, pool))]
+#[instrument(skip(http_req, req, pool))]
 pub async fn flip_coin_batch(
-    auth: BasicAuth,
+    http_req: HttpRequest,
     req: web::Json<BatchRequest>,
     pool: web::Data<sqlx::PgPool>,
 ) -> impl Responder {
     let count = req.count;
     if count == 0 || count > 1000 {
-        return HttpResponse::BadRequest().json(serde_json::json!({ "detail": "Count must be between 1 and 1000" }));
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "detail": "Count must be between 1 and 1000" }));
     }
 
-    let auth_res = authenticate(&auth, &pool).await;
-    if auth_res.is_none() {
-        return HttpResponse::Unauthorized()
-            .insert_header((header::WWW_AUTHENTICATE, "Basic"))
-            .json(serde_json::json!({ "detail": "Incorrect enterprise credentials" }));
+    let principal = match iam::resolve_principal(&http_req, &pool).await {
+        Ok(p) => p,
+        Err(AuthError::MissingCredentials) | Err(AuthError::InvalidCredentials(_)) => {
+            return HttpResponse::Unauthorized()
+                .insert_header((header::WWW_AUTHENTICATE, "Bearer realm=\"okta-auth0\", Basic realm=\"enterprise-breakglass\""))
+                .json(serde_json::json!({ "detail": "Incorrect enterprise credentials" }));
+        }
+        Err(AuthError::DeprovisionedAccount(msg)) => {
+            return HttpResponse::Forbidden().json(serde_json::json!({
+                "detail": msg,
+                "policy_layer": "scim_lifecycle_revocation"
+            }));
+        }
+    };
+
+    let require_hardware_qpu = http_req
+        .headers()
+        .get("X-Require-Hardware-QPU")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    let policy = iam::evaluate_flip_policy(&principal, count, require_hardware_qpu);
+    if !policy.allowed {
+        iam::record_iam_audit_event(
+            &pool,
+            Some(principal.account_id),
+            &principal.username,
+            "IAM_BATCH_POLICY_DENY",
+            "AUTHZ",
+            &policy.decision_reason,
+        )
+        .await;
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "detail": policy.decision_reason,
+            "policy_tier": policy.policy_tier,
+            "effective_max_batch": policy.effective_max_batch
+        }));
     }
-    
-    let (account_id, webhook_url) = auth_res.unwrap();
+
+    let account_id = principal.account_id;
+    let webhook_url = principal.webhook_url.clone();
+    let allow_hardware_qpu = policy.allow_hardware_qpu;
     let pool_clone = pool.get_ref().clone();
     let webhook_url_response = webhook_url.clone();
 
     tokio::spawn(async move {
-        info!("Starting batch quantum flip worker for accountID={}, count={}", account_id, count);
+        info!(
+            "Starting batch quantum flip worker for accountID={}, count={}, allow_hardware_qpu={}",
+            account_id, count, allow_hardware_qpu
+        );
         let ionq_key = std::env::var("IONQ_API_KEY").unwrap_or_default();
         let mut environment = "Pure-Rust Fallback State Vector Simulator".to_string();
         let mut results = vec![0; count];
 
-        if !ionq_key.is_empty() {
+        if !ionq_key.is_empty() && allow_hardware_qpu {
             environment = "IonQ Aria Physical QPU ($12.42 Flat Fee)".to_string();
             let client = reqwest::Client::new();
             let payload = serde_json::json!({
@@ -407,7 +527,7 @@ pub async fn flip_coin_batch(
             }
         }
 
-        let total_cost = if !ionq_key.is_empty() { 12.42 } else { 0.0 };
+        let total_cost = if !ionq_key.is_empty() && allow_hardware_qpu { 12.42 } else { 0.0 };
         let cost_per_shot = total_cost / (count as f64);
 
         for r in &results {
