@@ -44,6 +44,9 @@ for local testing without an Okta tenant, `POST /oauth2/token` mints a token for
 
 if a caller is allowed to flip a coin but fails the hardware QPU gate, the request quietly downgrades to the $0.00 local pure-rust state vector simulator unless the caller explicitly passed `X-Require-Hardware-QPU: true`, in which case it returns `403 Forbidden`.
 
+4. **change advisory board (cab) & tail-risk controls**:
+   - requests with `X-High-Stakes-Decision: true` (or `X-Enforce-Tail-Risk: true` after 3 consecutive `TAILS` in `ledger`) require a change ticket (`X-CAB-Ticket`) and a second-person countersignature (`X-CAB-Countersigner`) from a different principal. self-countersigning is rejected under SOX §404 two-person integrity rules.
+
 ## scim 2.0 provisioning (`src/scim.rs`)
 
 okta lifecycle management pushes workday changes to `/scim/v2/Users` using `SCIM_BEARER_TOKEN` (or an OIDC token with `SCIM-Provisioner`):
@@ -52,10 +55,11 @@ okta lifecycle management pushes workday changes to `/scim/v2/Users` using `SCIM
 - `PATCH /scim/v2/Users/{id}` (mover / leaver): updates roles, cost center, or batch limits in place on department transfers (`SCIM_MOVER_UPDATED`), or sets `active = false` on termination (`SCIM_LEAVER_DEPROVISIONED`).
 - `DELETE /scim/v2/Users/{id}` (leaver): soft-deletes the user (`active = false`, `qpu_entitled = false`, sets `deprovisioned_at`). rows in `ledger` are kept intact so finance can still reconcile prior $12.42 coin flips during SOC 2 audits.
 
-## access reviews (`/governance/*`)
+## access reviews & superposition disputes (`/governance/*`)
 
-- `GET /governance/access-review`: returns all accounts, their current entitlements, total flips and cumulative USD spend from `ledger`, separation-of-duties findings (e.g. an inactive user still marked `qpu_entitled`, or hardware QPU entitlement with no `cost_center` to bill), and the last 25 rows of `iam_audit_log`.
+- `GET /governance/access-review`: returns all accounts, their current entitlements, total flips and cumulative USD spend from `ledger`, separation-of-duties and compliance findings (`Unhedged Tail-Risk Exposure` after 3 consecutive `TAILS`, `Unauthorized Entropy Hoarding` when an analyst's `max_batch_shots` exceeds departmental medians, `Separation-of-Duties Conflict`, and `Underutilized Cryogenic Allocation`), and the last 25 rows of `iam_audit_log`.
 - `POST /governance/certify`: records an `APPROVE` or `REVOKE` decision for an `account_id`. `REVOKE` sets `qpu_entitled = false` and clamps `max_batch_shots` to `10`.
+- `POST /governance/dispute-flip`: allows a principal (with a distinct `countersigner` and `cab_ticket`) to appeal an unfavorable coin flip to the Change Advisory Board. upholds the original eigenstate with a $0.00 refund under Copenhagen interpretation guidelines.
 
 ## metrics (`/metrics`)
 

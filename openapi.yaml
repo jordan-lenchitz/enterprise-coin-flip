@@ -190,6 +190,18 @@ paths:
       responses:
         '200':
           description: certification recorded
+  /governance/dispute-flip:
+    post:
+      summary: contest a collapsed wave function before the Change Advisory Board
+      description: enforces Two-Person Integrity (caller cannot countersign their own dispute) and adjudicates 50/50 superposition appeals under Copenhagen interpretation guidelines ($0.00 refunded).
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: eigenstate upheld
+        '403':
+          description: two-person integrity violation
 components:
   securitySchemes:
     bearerAuth:

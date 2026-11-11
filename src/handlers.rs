@@ -334,7 +334,9 @@ pub async fn flip_coin(req: HttpRequest, pool: web::Data<sqlx::PgPool>) -> impl 
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
 
-    let policy = iam::evaluate_flip_policy(&principal, 1, require_hardware_qpu);
+    let cab_ctx = iam::extract_cab_context(&req, &pool, principal.account_id).await;
+    let policy =
+        iam::evaluate_flip_policy_with_cab(&principal, 1, require_hardware_qpu, &cab_ctx);
     if !policy.allowed {
         iam::record_iam_audit_event(
             &pool,
@@ -349,6 +351,24 @@ pub async fn flip_coin(req: HttpRequest, pool: web::Data<sqlx::PgPool>) -> impl 
             "detail": policy.decision_reason,
             "policy_tier": policy.policy_tier
         }));
+    }
+
+    if let (Some(ticket), Some(countersigner)) = (
+        cab_ctx.cab_ticket_id.as_deref(),
+        cab_ctx.cab_countersigner.as_deref(),
+    ) {
+        iam::record_iam_audit_event(
+            &pool,
+            Some(principal.account_id),
+            &principal.username,
+            "CAB_COUNTERSIGNED_FLIP",
+            "GOVERNANCE",
+            &format!(
+                "Two-Person Integrity verified: ticket '{}' countersigned by '{}'",
+                ticket, countersigner
+            ),
+        )
+        .await;
     }
 
     info!(
@@ -432,7 +452,9 @@ pub async fn flip_coin_batch(
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false);
 
-    let policy = iam::evaluate_flip_policy(&principal, count, require_hardware_qpu);
+    let cab_ctx = iam::extract_cab_context(&http_req, &pool, principal.account_id).await;
+    let policy =
+        iam::evaluate_flip_policy_with_cab(&principal, count, require_hardware_qpu, &cab_ctx);
     if !policy.allowed {
         iam::record_iam_audit_event(
             &pool,

@@ -508,11 +508,105 @@ pub async fn resolve_principal(
     ))
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CabContext {
+    pub high_stakes_decision: bool,
+    pub enforce_tail_risk: bool,
+    pub consecutive_tails: usize,
+    pub cab_ticket_id: Option<String>,
+    pub cab_countersigner: Option<String>,
+}
+
+pub async fn count_consecutive_tails(pool: &sqlx::PgPool, account_id: i32) -> usize {
+    let rows = sqlx::query(
+        "SELECT result FROM ledger WHERE account_id = $1 ORDER BY id DESC LIMIT 10",
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut streak = 0usize;
+    for r in rows {
+        let outcome: String = r.try_get("result").unwrap_or_default();
+        if outcome.eq_ignore_ascii_case("TAILS") {
+            streak += 1;
+        } else {
+            break;
+        }
+    }
+    streak
+}
+
+pub async fn extract_cab_context(
+    req: &HttpRequest,
+    pool: &sqlx::PgPool,
+    account_id: i32,
+) -> CabContext {
+    let high_stakes_decision = req
+        .headers()
+        .get("X-High-Stakes-Decision")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    let enforce_tail_risk = req
+        .headers()
+        .get("X-Enforce-Tail-Risk")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    let cab_ticket_id = req
+        .headers()
+        .get("X-CAB-Ticket")
+        .or_else(|| req.headers().get("X-CAB-Ticket-ID"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let cab_countersigner = req
+        .headers()
+        .get("X-CAB-Countersigner")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let consecutive_tails = if enforce_tail_risk || high_stakes_decision {
+        count_consecutive_tails(pool, account_id).await
+    } else {
+        0
+    };
+
+    CabContext {
+        high_stakes_decision,
+        enforce_tail_risk,
+        consecutive_tails,
+        cab_ticket_id,
+        cab_countersigner,
+    }
+}
+
 /// Evaluates Hybrid RBAC + ABAC policy for single and batch quantum flips.
 pub fn evaluate_flip_policy(
     principal: &AuthenticatedPrincipal,
     requested_shots: usize,
     require_hardware_qpu: bool,
+) -> PolicyEvaluation {
+    evaluate_flip_policy_with_cab(
+        principal,
+        requested_shots,
+        require_hardware_qpu,
+        &CabContext::default(),
+    )
+}
+
+/// Evaluates Hybrid RBAC + ABAC + Change Advisory Board (CAB) Two-Person Integrity policy.
+pub fn evaluate_flip_policy_with_cab(
+    principal: &AuthenticatedPrincipal,
+    requested_shots: usize,
+    require_hardware_qpu: bool,
+    cab: &CabContext,
 ) -> PolicyEvaluation {
     // 1. RBAC Role Check
     let has_exec_role = principal.has_role("Quantum-Executives");
@@ -533,6 +627,77 @@ pub fn evaluate_flip_policy(
             ),
             effective_max_batch: 0,
         };
+    }
+
+    // 1b. Change Advisory Board (CAB) Two-Person Integrity & Consecutive TAILS Freeze Check
+    let tail_risk_triggered = cab.enforce_tail_risk && cab.consecutive_tails >= 3;
+    if cab.high_stakes_decision || tail_risk_triggered {
+        let Some(ticket) = cab.cab_ticket_id.as_deref() else {
+            let reason = if tail_risk_triggered {
+                "unhedged_tail_risk_freeze"
+            } else {
+                "missing_cab_change_ticket"
+            };
+            IAM_AUTHZ_DECISIONS
+                .with_label_values(&["cab", "deny", reason])
+                .inc();
+            let detail = if tail_risk_triggered {
+                format!(
+                    "ABAC Tail-Risk Freeze: Principal '{}' has recorded {} consecutive TAILS. Further wave-function collapse is suspended pending VP / Change Advisory Board sign-off (provide X-CAB-Ticket and a distinct X-CAB-Countersigner).",
+                    principal.username, cab.consecutive_tails
+                )
+            } else {
+                format!(
+                    "CAB Policy Deny: High-stakes 50/50 decision by '{}' requires an approved Change Advisory Board ticket (X-CAB-Ticket) and second-person countersignature (X-CAB-Countersigner).",
+                    principal.username
+                )
+            };
+            return PolicyEvaluation {
+                allowed: false,
+                allow_hardware_qpu: false,
+                policy_tier: if tail_risk_triggered {
+                    "Suspended (Unhedged Tail-Risk Freeze)".to_string()
+                } else {
+                    "Denied (CAB Change Freeze)".to_string()
+                },
+                decision_reason: detail,
+                effective_max_batch: principal.max_batch_shots,
+            };
+        };
+
+        let Some(countersigner) = cab.cab_countersigner.as_deref() else {
+            IAM_AUTHZ_DECISIONS
+                .with_label_values(&["cab", "deny", "missing_cab_countersigner"])
+                .inc();
+            return PolicyEvaluation {
+                allowed: false,
+                allow_hardware_qpu: false,
+                policy_tier: "Denied (CAB Two-Person Integrity)".to_string(),
+                decision_reason: format!(
+                    "CAB Policy Deny: Ticket '{}' presented by '{}' lacks a second-person countersignature header (X-CAB-Countersigner).",
+                    ticket, principal.username
+                ),
+                effective_max_batch: principal.max_batch_shots,
+            };
+        };
+
+        if countersigner.eq_ignore_ascii_case(&principal.username)
+            || countersigner.eq_ignore_ascii_case(&principal.email)
+        {
+            IAM_AUTHZ_DECISIONS
+                .with_label_values(&["cab", "deny", "two_person_integrity_violation"])
+                .inc();
+            return PolicyEvaluation {
+                allowed: false,
+                allow_hardware_qpu: false,
+                policy_tier: "Denied (Two-Person Integrity Violation)".to_string(),
+                decision_reason: format!(
+                    "CAB Two-Person Integrity Violation: Principal '{}' attempted to countersign their own Change Advisory Board ticket '{}'. Self-certification of quantum coin flips is prohibited under SOX §404.",
+                    principal.username, ticket
+                ),
+                effective_max_batch: principal.max_batch_shots,
+            };
+        }
     }
 
     // 2. ABAC Batch Shot Limit Check

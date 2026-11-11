@@ -57,6 +57,7 @@ async fn main() -> std::io::Result<()> {
             .service(scim::delete_scim_user)
             .service(scim::get_access_review)
             .service(scim::certify_access)
+            .service(scim::dispute_superposition)
             .service(handlers::get_metrics)
             .service(handlers::healthz)
             .service(handlers::readyz)
@@ -372,5 +373,155 @@ mod tests {
             .to_request();
         let oig_resp = test::call_service(&app, oig_req).await;
         assert!(oig_resp.status().is_success());
+    }
+
+    #[actix_web::test]
+    async fn test_cab_two_person_integrity_tail_risk_and_disputes() {
+        unsafe {
+            std::env::remove_var("IONQ_API_KEY");
+        }
+        let pool = get_test_pool().await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .service(crate::iam::issue_demo_oidc_token)
+                .service(crate::handlers::flip_coin)
+                .service(crate::scim::create_scim_user)
+                .service(crate::scim::get_access_review)
+                .service(crate::scim::dispute_superposition),
+        )
+        .await;
+
+        // Provision an analyst with an inflated batch quota (150 > 100) to trigger Entropy Hoarding
+        let joiner_req = test::TestRequest::post()
+            .uri("/scim/v2/Users")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                "Bearer okta-scim-secret-token-2026",
+            ))
+            .set_json(serde_json::json!({
+                "schemas": [
+                    "urn:ietf:params:scim:schemas:core:2.0:User",
+                    "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
+                ],
+                "externalId": "wd-emp-77101",
+                "userName": "tailrisk.analyst",
+                "active": true,
+                "roles": ["Quantum-Analysts"],
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                    "department": "Actuarial Risk",
+                    "costCenter": "CC-3020-RISK",
+                    "qpuEntitled": false,
+                    "maxBatchShots": 150
+                }
+            }))
+            .to_request();
+        let joiner_resp = test::call_service(&app, joiner_req).await;
+        assert_eq!(joiner_resp.status(), actix_web::http::StatusCode::CREATED);
+        let joiner_json: serde_json::Value =
+            serde_json::from_slice(&test::read_body(joiner_resp).await).unwrap();
+        let account_id: i32 = joiner_json["id"].as_str().unwrap().parse().unwrap();
+
+        // Seed 3 consecutive TAILS for this analyst in the ledger
+        for _ in 0..3 {
+            sqlx::query(
+                "INSERT INTO ledger (account_id, environment, cost, result) VALUES ($1, 'Simulator', 0.0, 'TAILS')",
+            )
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Issue OIDC token for tailrisk.analyst
+        let tok_req = test::TestRequest::post()
+            .uri("/oauth2/token")
+            .set_json(serde_json::json!({
+                "persona": "analyst",
+                "sub": "tailrisk.analyst",
+                "max_batch_shots": 150
+            }))
+            .to_request();
+        let tok_resp = test::call_service(&app, tok_req).await;
+        let tok_json: serde_json::Value =
+            serde_json::from_slice(&test::read_body(tok_resp).await).unwrap();
+        let jwt = tok_json["access_token"].as_str().unwrap();
+
+        // 1. Tail-risk enforcement blocks 4th flip after 3 consecutive TAILS without CAB sign-off
+        let freeze_req = test::TestRequest::post()
+            .uri("/flip")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                format!("Bearer {}", jwt),
+            ))
+            .insert_header(("X-Enforce-Tail-Risk", "true"))
+            .to_request();
+        let freeze_resp = test::call_service(&app, freeze_req).await;
+        assert_eq!(freeze_resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+
+        // 2. Self-countersigning CAB ticket violates Two-Person Integrity
+        let self_cab_req = test::TestRequest::post()
+            .uri("/flip")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                format!("Bearer {}", jwt),
+            ))
+            .insert_header(("X-High-Stakes-Decision", "true"))
+            .insert_header(("X-CAB-Ticket", "CAB-2026-0404"))
+            .insert_header(("X-CAB-Countersigner", "tailrisk.analyst"))
+            .to_request();
+        let self_cab_resp = test::call_service(&app, self_cab_req).await;
+        assert_eq!(
+            self_cab_resp.status(),
+            actix_web::http::StatusCode::FORBIDDEN
+        );
+
+        // 3. Distinct countersigner satisfies CAB Two-Person Integrity and unblocks flip
+        let valid_cab_req = test::TestRequest::post()
+            .uri("/flip")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                format!("Bearer {}", jwt),
+            ))
+            .insert_header(("X-High-Stakes-Decision", "true"))
+            .insert_header(("X-CAB-Ticket", "CAB-2026-0404"))
+            .insert_header(("X-CAB-Countersigner", "vp.actuarial"))
+            .to_request();
+        let valid_cab_resp = test::call_service(&app, valid_cab_req).await;
+        assert!(valid_cab_resp.status().is_success());
+
+        // 4. Filing a 50/50 superposition dispute upholds the original eigenstate with $0.00 refund
+        let dispute_req = test::TestRequest::post()
+            .uri("/governance/dispute-flip")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                format!("Bearer {}", jwt),
+            ))
+            .set_json(serde_json::json!({
+                "contested_outcome": "TAILS",
+                "grounds": "Suspected Decoherence",
+                "cab_ticket": "CAB-2026-0999",
+                "countersigner": "vp.actuarial"
+            }))
+            .to_request();
+        let dispute_resp = test::call_service(&app, dispute_req).await;
+        assert!(dispute_resp.status().is_success());
+        let dispute_json: serde_json::Value =
+            serde_json::from_slice(&test::read_body(dispute_resp).await).unwrap();
+        assert_eq!(dispute_json["ruling"], "UPHELD_ORIGINAL_EIGENSTATE");
+        assert_eq!(dispute_json["refund_approved_usd"], 0.0);
+
+        // 5. OIG Access Review surfaces Bureaucratic Findings (Entropy Hoarding)
+        let oig_req = test::TestRequest::get()
+            .uri("/governance/access-review")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                "Bearer okta-scim-secret-token-2026",
+            ))
+            .to_request();
+        let oig_resp = test::call_service(&app, oig_req).await;
+        assert!(oig_resp.status().is_success());
+        let oig_body = String::from_utf8(test::read_body(oig_resp).await.to_vec()).unwrap();
+        assert!(oig_body.contains("Unauthorized Entropy Hoarding"));
     }
 }

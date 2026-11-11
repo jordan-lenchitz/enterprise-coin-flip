@@ -670,12 +670,55 @@ pub async fn get_access_review(
         let total_flips: i64 = r.try_get("total_flips").unwrap_or(0);
         let total_spend: f64 = r.try_get("total_spend").unwrap_or(0.0);
 
+        let role_list: Vec<&str> = roles.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let is_exec = role_list.iter().any(|r| r.eq_ignore_ascii_case("Quantum-Executives"));
+        let is_analyst = role_list.iter().any(|r| r.eq_ignore_ascii_case("Quantum-Analysts"));
+        let is_scim_prov = role_list.iter().any(|r| r.eq_ignore_ascii_case("SCIM-Provisioner"));
+
+        let consecutive_tails = crate::iam::count_consecutive_tails(pool.get_ref(), id).await;
+
+        let mut bureaucratic_findings = Vec::new();
+        if !active && qpu_entitled {
+            bureaucratic_findings.push(
+                "CRITICAL: Deprovisioned account retains QPU hardware entitlement".to_string(),
+            );
+        }
+        if qpu_entitled && cost_center.trim().is_empty() {
+            bureaucratic_findings.push(
+                "WARN: Hardware QPU entitled without assigned Workday cost_center".to_string(),
+            );
+        }
+        if consecutive_tails >= 3 {
+            bureaucratic_findings.push(format!(
+                "FINDING [OIG-ENT-402]: Unhedged Tail-Risk Exposure ({} consecutive TAILS in ledger without VP risk acceptance or CAB sign-off)",
+                consecutive_tails
+            ));
+        }
+        if is_analyst && !is_exec && max_batch_shots > 100 {
+            bureaucratic_findings.push(format!(
+                "FINDING [OIG-ENT-109]: Unauthorized Entropy Hoarding (Analyst max_batch_shots={} exceeds departmental median of 50 without actuarial justification)",
+                max_batch_shots
+            ));
+        }
+        if is_exec && is_scim_prov {
+            bureaucratic_findings.push(
+                "FINDING [OIG-SOD-301]: Separation-of-Duties Conflict (Principal holds both SCIM-Provisioner and Quantum-Executives; can self-provision $12.42 QPU budget)".to_string(),
+            );
+        }
+        if active && qpu_entitled && total_flips == 0 {
+            bureaucratic_findings.push(
+                "FINDING [OIG-FIN-004]: Underutilized Cryogenic Allocation (Entitled to $12.42 physical Ytterbium-171 QPU with 0 wave functions collapsed this quarter)".to_string(),
+            );
+        }
+
         let sod_finding = if !active && qpu_entitled {
-            "CRITICAL: Deprovisioned account retains QPU hardware entitlement"
+            "CRITICAL: Deprovisioned account retains QPU hardware entitlement".to_string()
         } else if qpu_entitled && cost_center.trim().is_empty() {
-            "WARN: Hardware QPU entitled without assigned Workday cost_center"
+            "WARN: Hardware QPU entitled without assigned Workday cost_center".to_string()
+        } else if let Some(first) = bureaucratic_findings.first() {
+            first.clone()
         } else {
-            "COMPLIANT"
+            "COMPLIANT".to_string()
         };
 
         entitlements.push(serde_json::json!({
@@ -686,15 +729,17 @@ pub async fn get_access_review(
             "active": active,
             "department": r.try_get::<String, _>("department").unwrap_or_default(),
             "cost_center": cost_center,
-            "roles": roles.split(',').filter(|s| !s.is_empty()).collect::<Vec<_>>(),
+            "roles": role_list,
             "qpu_entitled": qpu_entitled,
             "max_batch_shots": max_batch_shots,
             "idp_issuer": r.try_get::<String, _>("idp_issuer").unwrap_or_default(),
             "ledger_usage": {
                 "total_flips": total_flips,
-                "total_qpu_spend_usd": (total_spend * 100.0).round() / 100.0
+                "total_qpu_spend_usd": (total_spend * 100.0).round() / 100.0,
+                "consecutive_tails": consecutive_tails
             },
-            "governance_Finding": sod_finding
+            "governance_Finding": sod_finding,
+            "bureaucratic_findings": bureaucratic_findings
         }));
     }
 
@@ -782,5 +827,87 @@ pub async fn certify_access(
         "decision": decision,
         "reviewer": reviewer,
         "remediation_applied": decision == "REVOKE"
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuperpositionDisputeRequest {
+    #[serde(default)]
+    pub ledger_id: Option<i32>,
+    pub contested_outcome: String,
+    pub grounds: String,
+    pub cab_ticket: String,
+    pub countersigner: String,
+}
+
+/// Change Advisory Board (CAB) 50/50 Superposition Dispute & Eigenstate Recount Endpoint.
+#[post("/governance/dispute-flip")]
+#[instrument(skip(req, body, pool))]
+pub async fn dispute_superposition(
+    req: HttpRequest,
+    body: web::Json<SuperpositionDisputeRequest>,
+    pool: web::Data<sqlx::PgPool>,
+) -> impl Responder {
+    let (caller_username, caller_email, caller_account_id) =
+        match resolve_principal(&req, pool.get_ref()).await {
+            Ok(p) => (p.username, p.email, Some(p.account_id)),
+            Err(_) => match authorize_scim_or_governance(&req, pool.get_ref()).await {
+                Ok(actor) => (actor.clone(), format!("{}@jordanlenchitz.com", actor), None),
+                Err(err_resp) => return err_resp,
+            },
+        };
+
+    let ticket = body.cab_ticket.trim();
+    let countersigner = body.countersigner.trim();
+    if ticket.is_empty() || countersigner.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "detail": "cab_ticket and countersigner are required to contest a collapsed wave function"
+        }));
+    }
+
+    if countersigner.eq_ignore_ascii_case(&caller_username)
+        || countersigner.eq_ignore_ascii_case(&caller_email)
+    {
+        IAM_AUTHZ_DECISIONS
+            .with_label_values(&["cab", "deny", "two_person_integrity_violation"])
+            .inc();
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "detail": format!(
+                "CAB Two-Person Integrity Violation: Principal '{}' cannot countersign their own 50/50 superposition dispute on ticket '{}'",
+                caller_username, ticket
+            ),
+            "policy_tier": "Denied (Two-Person Integrity Violation)"
+        }));
+    }
+
+    OIG_CERTIFICATIONS_TOTAL
+        .with_label_values(&["DISPUTE_UPHELD_EIGENSTATE"])
+        .inc();
+
+    let details = format!(
+        "CAB Superposition Dispute on ticket '{}' by '{}' (countersigned by '{}', contested='{}', grounds='{}'): UPHELD_ORIGINAL_EIGENSTATE ($0.00 refunded)",
+        ticket, caller_username, countersigner, body.contested_outcome, body.grounds
+    );
+    record_iam_audit_event(
+        pool.get_ref(),
+        caller_account_id,
+        &caller_username,
+        "CAB_SUPERPOSITION_DISPUTE",
+        "GOVERNANCE",
+        &details,
+    )
+    .await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "adjudicated",
+        "cab_ticket": ticket,
+        "appellant": caller_username,
+        "countersigner": countersigner,
+        "ledger_id": body.ledger_id,
+        "contested_outcome": body.contested_outcome,
+        "grounds": body.grounds,
+        "ruling": "UPHELD_ORIGINAL_EIGENSTATE",
+        "refund_approved_usd": 0.0,
+        "resolution": "The Change Advisory Board reviewed the Hilbert-space trajectory under Copenhagen interpretation guidelines. Wave-function collapse is irreversible and the $12.42 hardware fee remains non-refundable."
     }))
 }
