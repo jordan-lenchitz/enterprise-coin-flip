@@ -18,10 +18,6 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "tls-native-tls", "postgr
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-actix-web = "0.7"
-opentelemetry = { version = "0.21.0", features = ["metrics"] }
-opentelemetry_sdk = { version = "0.21.2", features = ["rt-tokio"] }
-tracing-opentelemetry = "0.22.0"
-opentelemetry-prometheus = "0.14.0"
 prometheus = "0.13.3"
 lazy_static = "1.4.0"
 
