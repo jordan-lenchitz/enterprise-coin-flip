@@ -28,7 +28,17 @@ async fn main() -> std::io::Result<()> {
     telemetry::init_telemetry();
     
     let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://admin:password@localhost:5432/coinflip".to_string());
-    let pool = sqlx::PgPool::connect(&db_url).await.expect("Failed to connect to PostgreSQL");
+    let max_connections: u32 = env::var("DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(max_connections)
+        .min_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
     info!("Successfully connected to PostgreSQL");
 
     init_db(&pool).await.expect("Failed to initialize database schema");
@@ -523,5 +533,97 @@ mod tests {
         assert!(oig_resp.status().is_success());
         let oig_body = String::from_utf8(test::read_body(oig_resp).await.to_vec()).unwrap();
         assert!(oig_body.contains("Unauthorized Entropy Hoarding"));
+    }
+
+    #[actix_web::test]
+    async fn test_flip_batch_bulk_ledger_insert_and_jwt_checks() {
+        unsafe {
+            std::env::remove_var("IONQ_API_KEY");
+        }
+        let pool = get_test_pool().await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .service(crate::iam::issue_demo_oidc_token)
+                .service(crate::handlers::flip_coin_batch)
+                .service(crate::scim::create_scim_user),
+        )
+        .await;
+
+        // Provision a dedicated user so we can assert exact bulk ledger row count
+        let joiner_req = test::TestRequest::post()
+            .uri("/scim/v2/Users")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                "Bearer okta-scim-secret-token-2026",
+            ))
+            .set_json(serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                "userName": "batch.verifier",
+                "active": true,
+                "roles": ["Quantum-Executives"],
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                    "department": "Verification",
+                    "costCenter": "CC-9000-QA",
+                    "qpuEntitled": false,
+                    "maxBatchShots": 200
+                }
+            }))
+            .to_request();
+        let joiner_resp = test::call_service(&app, joiner_req).await;
+        assert_eq!(joiner_resp.status(), actix_web::http::StatusCode::CREATED);
+        let joiner_json: serde_json::Value =
+            serde_json::from_slice(&test::read_body(joiner_resp).await).unwrap();
+        let account_id: i32 = joiner_json["id"].as_str().unwrap().parse().unwrap();
+
+        sqlx::query("DELETE FROM ledger WHERE account_id = $1")
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let tok_req = test::TestRequest::post()
+            .uri("/oauth2/token")
+            .set_json(serde_json::json!({
+                "persona": "executive",
+                "sub": "batch.verifier"
+            }))
+            .to_request();
+        let tok_resp = test::call_service(&app, tok_req).await;
+        let tok_json: serde_json::Value =
+            serde_json::from_slice(&test::read_body(tok_resp).await).unwrap();
+        let jwt = tok_json["access_token"].as_str().unwrap().to_string();
+
+        // Verify valid and tampered JWT error paths
+        assert!(crate::iam::verify_jwt(&jwt).is_ok());
+        assert!(crate::iam::verify_jwt("not.a.valid.jwt").is_err());
+        let tampered = format!("{}x", &jwt[..jwt.len() - 1]);
+        assert!(crate::iam::verify_jwt(&tampered).is_err());
+
+        // Trigger a 25-shot batch and poll briefly until background bulk UNNEST insert commits
+        let batch_req = test::TestRequest::post()
+            .uri("/flip/batch")
+            .insert_header((
+                actix_web::http::header::AUTHORIZATION,
+                format!("Bearer {}", jwt),
+            ))
+            .set_json(serde_json::json!({ "count": 25 }))
+            .to_request();
+        let batch_resp = test::call_service(&app, batch_req).await;
+        assert_eq!(batch_resp.status(), actix_web::http::StatusCode::ACCEPTED);
+
+        let mut inserted_count: i64 = 0;
+        for _ in 0..20 {
+            inserted_count = sqlx::query_scalar("SELECT COUNT(*) FROM ledger WHERE account_id = $1")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if inserted_count == 25 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(inserted_count, 25);
     }
 }

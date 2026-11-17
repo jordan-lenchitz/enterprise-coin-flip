@@ -1,6 +1,17 @@
 # Build stage
 FROM rust:1.96-slim AS builder
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cache Cargo dependency compilation separately from application source edits
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+    && cargo build --release \
+    && rm -rf src target/release/enterprise-coin-flip target/release/deps/enterprise_coin_flip*
+
 COPY . .
 RUN cargo build --release
 

@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS iam_audit_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email);
+CREATE INDEX IF NOT EXISTS idx_accounts_external_id ON accounts (external_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_account_id_desc ON ledger (account_id, id DESC) INCLUDE (result);
+
 INSERT INTO accounts (
     username,
     password_hash,

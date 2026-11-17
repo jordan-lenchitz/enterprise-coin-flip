@@ -5,12 +5,17 @@ use lazy_static::lazy_static;
 use serde::Serialize;
 use sqlx::Row;
 use std::env;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 use tracing::{info, warn, error, instrument};
 
 use crate::crypto::calculate_sha257sum;
 use crate::iam::{self, AuthError};
 use crate::quantum_simulator;
+
+const ENV_SIMULATOR: &str = "Pure-Rust Fallback State Vector Simulator";
+const ENV_IONQ_QPU: &str = "IonQ Aria Physical QPU ($12.42 Flat Fee)";
+const ENV_TIMEOUT_FALLBACK: &str = "Timeout/Fallback Simulator";
 
 lazy_static! {
     pub static ref FLIP_REQUESTS: IntCounter = 
@@ -21,37 +26,45 @@ lazy_static! {
         register_int_counter!("simulator_runs_total", "Total number of local simulator runs").unwrap();
 }
 
-#[instrument]
-pub async fn run_quantum_flip() -> (u8, String) {
-    run_quantum_flip_with_policy(true).await
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
-#[instrument]
+pub async fn run_quantum_flip() -> (u8, String) {
+    let (bit, env) = run_quantum_flip_inner(true).await;
+    (bit, env.to_string())
+}
+
 pub async fn run_quantum_flip_with_policy(allow_hardware_qpu: bool) -> (u8, String) {
+    let (bit, env) = run_quantum_flip_inner(allow_hardware_qpu).await;
+    (bit, env.to_string())
+}
+
+async fn run_quantum_flip_inner(allow_hardware_qpu: bool) -> (u8, &'static str) {
     if !allow_hardware_qpu {
         info!("ABAC policy restricted principal to local simulator tier ($0.00 cost-control).");
         SIMULATOR_RUNS.inc();
-        let result = quantum_simulator::simulate_coin_flip();
-        return (
-            result,
-            "Pure-Rust Fallback State Vector Simulator".to_string(),
-        );
+        return (quantum_simulator::simulate_coin_flip(), ENV_SIMULATOR);
     }
 
     let ionq_key = env::var("IONQ_API_KEY").unwrap_or_default();
     if ionq_key.is_empty() {
         warn!("No IONQ_API_KEY found. Falling back to local pure-Rust simulator.");
         SIMULATOR_RUNS.inc();
-        let result = quantum_simulator::simulate_coin_flip();
-        return (
-            result,
-            "Pure-Rust Fallback State Vector Simulator".to_string(),
-        );
+        return (quantum_simulator::simulate_coin_flip(), ENV_SIMULATOR);
     }
 
     info!("IONQ_API_KEY DETECTED. Connecting to physical IonQ ARIA (Capped $12.42)...");
-    
-    let client = reqwest::Client::new();
+
+    let client = http_client();
+    let auth_header = format!("apiKey {}", ionq_key);
     let payload = serde_json::json!({
         "target": "qpu.aria",
         "shots": 1,
@@ -65,8 +78,9 @@ pub async fn run_quantum_flip_with_policy(allow_hardware_qpu: bool) -> (u8, Stri
         }
     });
 
-    if let Ok(resp) = client.post("https://api.ionq.co/v1/jobs")
-        .header("Authorization", format!("apiKey {}", ionq_key))
+    if let Ok(resp) = client
+        .post("https://api.ionq.co/v1/jobs")
+        .header("Authorization", &auth_header)
         .json(&payload)
         .send()
         .await
@@ -74,12 +88,14 @@ pub async fn run_quantum_flip_with_policy(allow_hardware_qpu: bool) -> (u8, Stri
         if let Ok(json) = resp.json::<serde_json::Value>().await {
             if let Some(id) = json["id"].as_str() {
                 info!("Job created! ID: {}. Physical atoms are now being manipulated...", id);
-                
+                let poll_url = format!("https://api.ionq.co/v1/jobs/{}", id);
+
                 for _ in 0..60 {
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                    
-                    if let Ok(poll_resp) = client.get(&format!("https://api.ionq.co/v1/jobs/{}", id))
-                        .header("Authorization", format!("apiKey {}", ionq_key))
+
+                    if let Ok(poll_resp) = client
+                        .get(&poll_url)
+                        .header("Authorization", &auth_header)
                         .send()
                         .await
                     {
@@ -88,9 +104,9 @@ pub async fn run_quantum_flip_with_policy(allow_hardware_qpu: bool) -> (u8, Stri
                                 if status == "completed" {
                                     if let Some(histogram) = poll_json["data"]["histogram"].as_object() {
                                         if histogram.contains_key("1") {
-                                            return (1, "IonQ Aria Physical QPU ($12.42 Flat Fee)".to_string());
+                                            return (1, ENV_IONQ_QPU);
                                         } else {
-                                            return (0, "IonQ Aria Physical QPU ($12.42 Flat Fee)".to_string());
+                                            return (0, ENV_IONQ_QPU);
                                         }
                                     }
                                     break;
@@ -109,14 +125,10 @@ pub async fn run_quantum_flip_with_policy(allow_hardware_qpu: bool) -> (u8, Stri
     } else {
         error!("Failed to create IonQ job via HTTP");
     }
-    
+
     warn!("Polling timed out or failed. Falling back to local pure-Rust simulator.");
     SIMULATOR_RUNS.inc();
-    let result = quantum_simulator::simulate_coin_flip();
-    (
-        result,
-        "Timeout/Fallback Simulator".to_string(),
-    )
+    (quantum_simulator::simulate_coin_flip(), ENV_TIMEOUT_FALLBACK)
 }
 
 #[derive(Serialize)]
@@ -142,10 +154,7 @@ pub struct FlipResponse {
     pub metadata: Metadata,
 }
 
-#[get("/")]
-#[instrument]
-pub async fn get_ui() -> impl Responder {
-    let ionq_configured = env::var("IONQ_API_KEY").is_ok();
+fn render_ui_html(ionq_configured: bool) -> String {
     let status_color = if ionq_configured {
         "#00ff00"
     } else {
@@ -157,7 +166,7 @@ pub async fn get_ui() -> impl Responder {
         "SIMULATOR ACTIVE: NO API KEY DETECTED (RUST STATE VECTOR)"
     };
 
-    let html = format!(
+    format!(
         r#"
 <!DOCTYPE html>
 <html>
@@ -275,11 +284,23 @@ pub async fn get_ui() -> impl Responder {
 "#,
         status_color = status_color,
         status_text = status_text
-    );
+    )
+}
+
+#[get("/")]
+pub async fn get_ui() -> impl Responder {
+    static UI_HTML_IONQ: OnceLock<String> = OnceLock::new();
+    static UI_HTML_SIM: OnceLock<String> = OnceLock::new();
+
+    let html = if env::var_os("IONQ_API_KEY").is_some() {
+        UI_HTML_IONQ.get_or_init(|| render_ui_html(true))
+    } else {
+        UI_HTML_SIM.get_or_init(|| render_ui_html(false))
+    };
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(html)
+        .body(web::Bytes::from_static(html.as_bytes()))
 }
 
 #[instrument(skip(auth, pool))]
@@ -375,13 +396,13 @@ pub async fn flip_coin(req: HttpRequest, pool: web::Data<sqlx::PgPool>) -> impl 
         "Flip request authorized for principal='{}' via {} (tier='{}')",
         principal.username, principal.auth_method, policy.policy_tier
     );
-    let (result_bit, environment) = run_quantum_flip_with_policy(policy.allow_hardware_qpu).await;
+    let (result_bit, environment) = run_quantum_flip_inner(policy.allow_hardware_qpu).await;
     let outcome = if result_bit == 1 { "HEADS" } else { "TAILS" };
     info!("Wave function collapsed: {} on {}", outcome, environment);
 
-    FLIP_SUCCESSES.with_label_values(&[&environment]).inc();
+    FLIP_SUCCESSES.with_label_values(&[environment]).inc();
 
-    let flip_cost = if environment.contains("Physical QPU") {
+    let flip_cost = if environment == ENV_IONQ_QPU {
         12.42
     } else {
         0.0
@@ -390,7 +411,7 @@ pub async fn flip_coin(req: HttpRequest, pool: web::Data<sqlx::PgPool>) -> impl 
         "INSERT INTO ledger (account_id, environment, cost, result) VALUES ($1, $2, $3, $4)",
     )
     .bind(principal.account_id)
-    .bind(&environment)
+    .bind(environment)
     .bind(flip_cost)
     .bind(outcome)
     .execute(pool.get_ref())
@@ -403,7 +424,7 @@ pub async fn flip_coin(req: HttpRequest, pool: web::Data<sqlx::PgPool>) -> impl 
         metadata: Metadata {
             qubit_type: "IonQ Aria physical trapped-ion".to_string(),
             gate: "Hadamard (H)".to_string(),
-            environment,
+            environment: environment.to_string(),
             principal: Some(principal.username),
             auth_method: Some(principal.auth_method),
             idp_issuer: Some(principal.issuer),
@@ -484,12 +505,13 @@ pub async fn flip_coin_batch(
             account_id, count, allow_hardware_qpu
         );
         let ionq_key = std::env::var("IONQ_API_KEY").unwrap_or_default();
-        let mut environment = "Pure-Rust Fallback State Vector Simulator".to_string();
-        let mut results = vec![0; count];
+        let mut environment = ENV_SIMULATOR;
+        let mut results: Option<Vec<u8>> = None;
 
         if !ionq_key.is_empty() && allow_hardware_qpu {
-            environment = "IonQ Aria Physical QPU ($12.42 Flat Fee)".to_string();
-            let client = reqwest::Client::new();
+            environment = ENV_IONQ_QPU;
+            let client = http_client();
+            let auth_header = format!("apiKey {}", ionq_key);
             let payload = serde_json::json!({
                 "target": "qpu.aria",
                 "shots": count,
@@ -503,29 +525,28 @@ pub async fn flip_coin_batch(
                 }
             });
 
-            let mut success = false;
-            if let Ok(resp) = client.post("https://api.ionq.co/v1/jobs")
-                .header("Authorization", format!("apiKey {}", ionq_key))
+            if let Ok(resp) = client
+                .post("https://api.ionq.co/v1/jobs")
+                .header("Authorization", &auth_header)
                 .json(&payload)
                 .send()
                 .await
             {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     if let Some(id) = json["id"].as_str() {
+                        let poll_url = format!("https://api.ionq.co/v1/jobs/{}", id);
                         for _ in 0..60 {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            if let Ok(poll_resp) = client.get(&format!("https://api.ionq.co/v1/jobs/{}", id))
-                                .header("Authorization", format!("apiKey {}", ionq_key))
+                            if let Ok(poll_resp) = client
+                                .get(&poll_url)
+                                .header("Authorization", &auth_header)
                                 .send()
                                 .await
                             {
                                 if let Ok(poll_json) = poll_resp.json::<serde_json::Value>().await {
                                     if let Some(status) = poll_json["status"].as_str() {
                                         if status == "completed" {
-                                            for j in 0..count {
-                                                results[j] = quantum_simulator::simulate_coin_flip();
-                                            }
-                                            success = true;
+                                            results = Some(quantum_simulator::simulate_coin_flips(count));
                                             break;
                                         } else if status == "failed" || status == "canceled" {
                                             break;
@@ -537,43 +558,41 @@ pub async fn flip_coin_batch(
                     }
                 }
             }
-            if !success {
+            if results.is_none() {
                 warn!("Batch QPU execution failed, falling back to pure-Rust simulator");
-                for j in 0..count {
-                    results[j] = quantum_simulator::simulate_coin_flip();
-                }
-            }
-        } else {
-            for j in 0..count {
-                results[j] = quantum_simulator::simulate_coin_flip();
             }
         }
 
+        let results = results.unwrap_or_else(|| quantum_simulator::simulate_coin_flips(count));
         let total_cost = if !ionq_key.is_empty() && allow_hardware_qpu { 12.42 } else { 0.0 };
         let cost_per_shot = total_cost / (count as f64);
 
-        for r in &results {
-            let outcome = if *r == 1 { "HEADS" } else { "TAILS" };
-            let _ = sqlx::query("INSERT INTO ledger (account_id, environment, cost, result) VALUES ($1, $2, $3, $4)")
-                .bind(account_id)
-                .bind(&environment)
-                .bind(cost_per_shot)
-                .bind(outcome)
-                .execute(&pool_clone)
-                .await;
-        }
+        let outcomes: Vec<&'static str> = results
+            .iter()
+            .map(|&r| if r == 1 { "HEADS" } else { "TAILS" })
+            .collect();
+
+        let _ = sqlx::query(
+            "INSERT INTO ledger (account_id, environment, cost, result) \
+             SELECT $1, $2, $3, outcome FROM UNNEST($4::text[]) AS outcome",
+        )
+        .bind(account_id)
+        .bind(environment)
+        .bind(cost_per_shot)
+        .bind(&outcomes)
+        .execute(&pool_clone)
+        .await;
 
         if !webhook_url.is_empty() {
             info!("Firing webhook to {}", webhook_url);
-            let str_results: Vec<&str> = results.iter().map(|&r| if r == 1 { "HEADS" } else { "TAILS" }).collect();
             let payload = serde_json::json!({
                 "status": "success",
                 "batch_size": count,
-                "results": str_results,
+                "results": outcomes,
                 "raw_bits": results,
                 "environment": environment
             });
-            let _ = reqwest::Client::new().post(&webhook_url).json(&payload).send().await;
+            let _ = http_client().post(&webhook_url).json(&payload).send().await;
         }
     });
 
@@ -586,10 +605,13 @@ pub async fn flip_coin_batch(
 
 #[get("/metrics")]
 pub async fn get_metrics() -> impl Responder {
-    let encoder = TextEncoder::new();
+    static METRICS_ENCODER: LazyLock<TextEncoder> = LazyLock::new(TextEncoder::new);
     let metric_families = prometheus::gather();
-    let mut buffer = vec![];
-    encoder.encode(&metric_families, &mut buffer).unwrap();
+    let mut buffer = Vec::with_capacity(4096);
+    if let Err(e) = METRICS_ENCODER.encode(&metric_families, &mut buffer) {
+        error!("Failed to encode Prometheus metrics: {}", e);
+        return HttpResponse::InternalServerError().finish();
+    }
     HttpResponse::Ok().content_type("text/plain").body(buffer)
 }
 

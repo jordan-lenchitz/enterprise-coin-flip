@@ -2,6 +2,7 @@ use actix_web::{delete, get, patch, post, web, HttpRequest, HttpResponse, Respon
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::env;
+use std::sync::OnceLock;
 use tracing::{info, instrument, warn};
 
 use crate::crypto::calculate_sha257sum;
@@ -98,14 +99,21 @@ fn scim_error(status: actix_web::http::StatusCode, detail: &str) -> HttpResponse
     }))
 }
 
+fn scim_bearer_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        env::var("SCIM_BEARER_TOKEN")
+            .unwrap_or_else(|_| "okta-scim-secret-token-2026".to_string())
+    })
+}
+
 /// Validates that the caller has SCIM provisioning or Governance Admin privileges,
 /// or presents the configured `SCIM_BEARER_TOKEN`.
 async fn authorize_scim_or_governance(
     req: &HttpRequest,
     pool: &sqlx::PgPool,
 ) -> Result<String, HttpResponse> {
-    let expected_scim_token = env::var("SCIM_BEARER_TOKEN")
-        .unwrap_or_else(|_| "okta-scim-secret-token-2026".to_string());
+    let expected_scim_token = scim_bearer_token();
 
     if let Some(auth_val) = req
         .headers()
@@ -209,11 +217,14 @@ pub async fn list_scim_users(
 
     // Parse optional SCIM filter: userName eq "value"
     let filter_username = query.filter.as_ref().and_then(|f| {
-        let parts: Vec<&str> = f.splitn(3, ' ').collect();
-        if parts.len() == 3 && parts[0].eq_ignore_ascii_case("userName") && parts[1].eq_ignore_ascii_case("eq") {
-            Some(parts[2].trim_matches('"').trim_matches('\'').to_string())
-        } else {
-            None
+        let mut parts = f.splitn(3, ' ');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(attr), Some(op), Some(val))
+                if attr.eq_ignore_ascii_case("userName") && op.eq_ignore_ascii_case("eq") =>
+            {
+                Some(val.trim_matches('"').trim_matches('\'').to_string())
+            }
+            _ => None,
         }
     });
 
@@ -319,8 +330,10 @@ pub async fn create_scim_user(
     let qpu_entitled = ext.qpu_entitled.unwrap_or(is_exec);
     let max_batch_shots = ext.max_batch_shots.unwrap_or(if is_exec { 1000 } else { 50 });
 
-    // Generate deterministic break-glass hash for SCIM-provisioned account
-    let default_pwd_hash = calculate_sha257sum("111111111111111111111");
+    // Generate deterministic break-glass hash once for SCIM-provisioned accounts
+    static DEFAULT_PWD_HASH: OnceLock<String> = OnceLock::new();
+    let default_pwd_hash =
+        DEFAULT_PWD_HASH.get_or_init(|| calculate_sha257sum("111111111111111111111"));
 
     let row_res = sqlx::query(
         "INSERT INTO accounts (username, password_hash, external_id, email, active, department, cost_center, roles, qpu_entitled, max_batch_shots, idp_issuer) \
@@ -339,7 +352,7 @@ pub async fn create_scim_user(
          RETURNING id, username, external_id, email, active, department, cost_center, roles, qpu_entitled, max_batch_shots",
     )
     .bind(&body.user_name)
-    .bind(&default_pwd_hash)
+    .bind(default_pwd_hash.as_str())
     .bind(&body.external_id)
     .bind(&email)
     .bind(body.active)
@@ -648,17 +661,31 @@ pub async fn get_access_review(
     let account_rows = sqlx::query(
         "SELECT a.id, a.username, a.external_id, a.email, a.active, a.department, a.cost_center, \
                 a.roles, a.qpu_entitled, a.max_batch_shots, a.idp_issuer, \
-                COUNT(l.id) AS total_flips, COALESCE(SUM(l.cost), 0)::FLOAT8 AS total_spend \
+                COALESCE(stats.total_flips, 0) AS total_flips, \
+                COALESCE(stats.total_spend, 0)::FLOAT8 AS total_spend, \
+                COALESCE(tails.recent_results, ARRAY[]::TEXT[]) AS recent_results \
          FROM accounts a \
-         LEFT JOIN ledger l ON l.account_id = a.id \
-         GROUP BY a.id \
+         LEFT JOIN LATERAL ( \
+             SELECT COUNT(*) AS total_flips, COALESCE(SUM(l.cost), 0) AS total_spend \
+             FROM ledger l \
+             WHERE l.account_id = a.id \
+         ) stats ON TRUE \
+         LEFT JOIN LATERAL ( \
+             SELECT ARRAY( \
+                 SELECT l.result::TEXT \
+                 FROM ledger l \
+                 WHERE l.account_id = a.id \
+                 ORDER BY l.id DESC \
+                 LIMIT 10 \
+             ) AS recent_results \
+         ) tails ON TRUE \
          ORDER BY a.id ASC",
     )
     .fetch_all(pool.get_ref())
     .await
     .unwrap_or_default();
 
-    let mut entitlements = Vec::new();
+    let mut entitlements = Vec::with_capacity(account_rows.len());
     for r in &account_rows {
         let id: i32 = r.try_get("id").unwrap_or(0);
         let username: String = r.try_get("username").unwrap_or_default();
@@ -669,13 +696,17 @@ pub async fn get_access_review(
         let max_batch_shots: i32 = r.try_get("max_batch_shots").unwrap_or(0);
         let total_flips: i64 = r.try_get("total_flips").unwrap_or(0);
         let total_spend: f64 = r.try_get("total_spend").unwrap_or(0.0);
+        let recent_results: Vec<String> = r.try_get("recent_results").unwrap_or_default();
 
         let role_list: Vec<&str> = roles.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
         let is_exec = role_list.iter().any(|r| r.eq_ignore_ascii_case("Quantum-Executives"));
         let is_analyst = role_list.iter().any(|r| r.eq_ignore_ascii_case("Quantum-Analysts"));
         let is_scim_prov = role_list.iter().any(|r| r.eq_ignore_ascii_case("SCIM-Provisioner"));
 
-        let consecutive_tails = crate::iam::count_consecutive_tails(pool.get_ref(), id).await;
+        let consecutive_tails = recent_results
+            .iter()
+            .take_while(|res| res.eq_ignore_ascii_case("TAILS"))
+            .count();
 
         let mut bureaucratic_findings = Vec::new();
         if !active && qpu_entitled {

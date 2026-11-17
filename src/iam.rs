@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::env;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, instrument, warn};
 
@@ -100,10 +101,11 @@ impl AuthenticatedPrincipal {
     pub fn has_mfa(&self) -> bool {
         self.auth_method == "basic-breakglass"
             || self.amr.iter().any(|m| {
-                matches!(
-                    m.to_ascii_lowercase().as_str(),
-                    "mfa" | "otp" | "hwk" | "webauthn" | "push"
-                )
+                m.eq_ignore_ascii_case("mfa")
+                    || m.eq_ignore_ascii_case("otp")
+                    || m.eq_ignore_ascii_case("hwk")
+                    || m.eq_ignore_ascii_case("webauthn")
+                    || m.eq_ignore_ascii_case("push")
             })
     }
 }
@@ -117,37 +119,55 @@ pub struct PolicyEvaluation {
     pub effective_max_batch: usize,
 }
 
-fn jwt_signing_secret() -> String {
-    env::var("OIDC_JWT_SECRET")
-        .unwrap_or_else(|_| "enterprise-quantum-oidc-hmac-secret-2026".to_string())
+fn jwt_signing_secret() -> &'static str {
+    static SECRET: OnceLock<String> = OnceLock::new();
+    SECRET.get_or_init(|| {
+        env::var("OIDC_JWT_SECRET")
+            .unwrap_or_else(|_| "enterprise-quantum-oidc-hmac-secret-2026".to_string())
+    })
 }
 
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    const BLOCK_SIZE: usize = 64;
-    let mut key_block = [0u8; BLOCK_SIZE];
-    if key.len() > BLOCK_SIZE {
-        let mut hasher = Sha256::new();
-        hasher.update(key);
-        let digest = hasher.finalize();
-        key_block[..32].copy_from_slice(&digest);
-    } else {
-        key_block[..key.len()].copy_from_slice(key);
-    }
+fn custom_oidc_issuer() -> &'static str {
+    static ISSUER: OnceLock<String> = OnceLock::new();
+    ISSUER.get_or_init(|| env::var("OIDC_ISSUER_URI").unwrap_or_default())
+}
 
-    let mut ipad = [0x36u8; BLOCK_SIZE];
-    let mut opad = [0x5cu8; BLOCK_SIZE];
-    for i in 0..BLOCK_SIZE {
-        ipad[i] ^= key_block[i];
-        opad[i] ^= key_block[i];
-    }
+fn precomputed_hmac_states() -> &'static (Sha256, Sha256) {
+    static STATES: OnceLock<(Sha256, Sha256)> = OnceLock::new();
+    STATES.get_or_init(|| {
+        const BLOCK_SIZE: usize = 64;
+        let key = jwt_signing_secret().as_bytes();
+        let mut key_block = [0u8; BLOCK_SIZE];
+        if key.len() > BLOCK_SIZE {
+            let digest = Sha256::digest(key);
+            key_block[..32].copy_from_slice(&digest);
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
 
-    let mut inner = Sha256::new();
-    inner.update(ipad);
+        let mut ipad = [0x36u8; BLOCK_SIZE];
+        let mut opad = [0x5cu8; BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            ipad[i] ^= key_block[i];
+            opad[i] ^= key_block[i];
+        }
+
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        (inner, outer)
+    })
+}
+
+#[inline]
+fn hmac_sha256_secret(message: &[u8]) -> [u8; 32] {
+    let (inner_base, outer_base) = precomputed_hmac_states();
+    let mut inner = inner_base.clone();
     inner.update(message);
     let inner_hash = inner.finalize();
 
-    let mut outer = Sha256::new();
-    outer.update(opad);
+    let mut outer = outer_base.clone();
     outer.update(inner_hash);
     let outer_hash = outer.finalize();
 
@@ -167,50 +187,110 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn jwt_header_b64() -> &'static str {
+    static HEADER_B64: OnceLock<String> = OnceLock::new();
+    HEADER_B64.get_or_init(|| {
+        URL_SAFE_NO_PAD
+            .encode(br#"{"alg":"HS256","typ":"JWT","kid":"jordanlenchitz-iam-key-2026-01"}"#)
+    })
+}
+
+#[derive(Deserialize)]
+struct JwtHeader<'a> {
+    #[serde(default)]
+    alg: Option<&'a str>,
+}
+
 pub fn mint_jwt(claims: &OidcClaims) -> String {
-    let header = serde_json::json!({
-        "alg": "HS256",
-        "typ": "JWT",
-        "kid": "jordanlenchitz-iam-key-2026-01"
-    });
-    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
-    let signing_input = format!("{}.{}", header_b64, claims_b64);
-    let sig = hmac_sha256(jwt_signing_secret().as_bytes(), signing_input.as_bytes());
-    let sig_b64 = URL_SAFE_NO_PAD.encode(sig);
-    format!("{}.{}", signing_input, sig_b64)
+    let header_b64 = jwt_header_b64();
+    let claims_bytes = serde_json::to_vec(claims).unwrap();
+    let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_bytes);
+
+    let mut token = String::with_capacity(header_b64.len() + 1 + claims_b64.len() + 1 + 43);
+    token.push_str(header_b64);
+    token.push('.');
+    token.push_str(&claims_b64);
+
+    let sig = hmac_sha256_secret(token.as_bytes());
+    let mut sig_b64_buf = [0u8; 44];
+    let sig_len = URL_SAFE_NO_PAD
+        .encode_slice(sig, &mut sig_b64_buf)
+        .expect("32-byte HMAC signature fits in 44 base64url bytes");
+
+    token.push('.');
+    token.push_str(
+        std::str::from_utf8(&sig_b64_buf[..sig_len]).expect("base64url is valid ASCII"),
+    );
+    token
 }
 
 pub fn verify_jwt(token: &str) -> Result<OidcClaims, String> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err("Malformed JWT: expected 3 dot-separated segments".to_string());
-    }
+    let (header_b64, payload_b64, sig_b64) = {
+        let mut parts = token.split('.');
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(h), Some(p), Some(s), None) => (h, p, s),
+            _ => {
+                return Err("Malformed JWT: expected 3 dot-separated segments".to_string());
+            }
+        }
+    };
 
-    let header_bytes = URL_SAFE_NO_PAD
-        .decode(parts[0])
-        .map_err(|_| "Malformed JWT header base64url".to_string())?;
-    let header_json: serde_json::Value = serde_json::from_slice(&header_bytes)
+    let mut header_stack = [0u8; 256];
+    let header_heap;
+    let header_bytes: &[u8] = if header_b64.len() <= 340 {
+        let n = URL_SAFE_NO_PAD
+            .decode_slice(header_b64, &mut header_stack)
+            .map_err(|_| "Malformed JWT header base64url".to_string())?;
+        &header_stack[..n]
+    } else {
+        header_heap = URL_SAFE_NO_PAD
+            .decode(header_b64)
+            .map_err(|_| "Malformed JWT header base64url".to_string())?;
+        &header_heap
+    };
+
+    let header: JwtHeader<'_> = serde_json::from_slice(header_bytes)
         .map_err(|_| "Malformed JWT header JSON".to_string())?;
-
-    if header_json["alg"].as_str() != Some("HS256") {
+    if header.alg != Some("HS256") {
         return Err("Unsupported JWT signing algorithm; expected HS256".to_string());
     }
 
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let expected_sig = hmac_sha256(jwt_signing_secret().as_bytes(), signing_input.as_bytes());
-    let provided_sig = URL_SAFE_NO_PAD
-        .decode(parts[2])
-        .map_err(|_| "Malformed JWT signature base64url".to_string())?;
+    let signing_input = &token.as_bytes()[..header_b64.len() + 1 + payload_b64.len()];
+    let expected_sig = hmac_sha256_secret(signing_input);
 
-    if !constant_time_eq(&expected_sig, &provided_sig) {
+    let mut sig_stack = [0u8; 64];
+    let sig_heap;
+    let provided_sig: &[u8] = if sig_b64.len() <= 84 {
+        let n = URL_SAFE_NO_PAD
+            .decode_slice(sig_b64, &mut sig_stack)
+            .map_err(|_| "Malformed JWT signature base64url".to_string())?;
+        &sig_stack[..n]
+    } else {
+        sig_heap = URL_SAFE_NO_PAD
+            .decode(sig_b64)
+            .map_err(|_| "Malformed JWT signature base64url".to_string())?;
+        &sig_heap
+    };
+
+    if !constant_time_eq(&expected_sig, provided_sig) {
         return Err("Invalid JWT cryptographic signature".to_string());
     }
 
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|_| "Malformed JWT payload base64url".to_string())?;
-    let claims: OidcClaims = serde_json::from_slice(&payload_bytes)
+    let mut payload_stack = [0u8; 2048];
+    let payload_heap;
+    let payload_bytes: &[u8] = if payload_b64.len() <= 2728 {
+        let n = URL_SAFE_NO_PAD
+            .decode_slice(payload_b64, &mut payload_stack)
+            .map_err(|_| "Malformed JWT payload base64url".to_string())?;
+        &payload_stack[..n]
+    } else {
+        payload_heap = URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .map_err(|_| "Malformed JWT payload base64url".to_string())?;
+        &payload_heap
+    };
+
+    let claims: OidcClaims = serde_json::from_slice(payload_bytes)
         .map_err(|e| format!("Invalid OIDC claims schema: {}", e))?;
 
     let now = SystemTime::now()
@@ -222,12 +302,12 @@ pub fn verify_jwt(token: &str) -> Result<OidcClaims, String> {
         return Err("OIDC access token has expired (exp <= now)".to_string());
     }
 
-    let custom_issuer = env::var("OIDC_ISSUER_URI").unwrap_or_default();
+    let custom_issuer = custom_oidc_issuer();
     let trusted_issuers = [
         DEFAULT_OKTA_ISSUER,
         DEFAULT_AUTH0_ISSUER,
         DEFAULT_LOCAL_ISSUER,
-        custom_issuer.as_str(),
+        custom_issuer,
     ];
     if !trusted_issuers
         .iter()
@@ -278,7 +358,14 @@ pub async fn resolve_principal(
 
         let row = sqlx::query(
             "SELECT id, username, email, active, department, cost_center, roles, qpu_entitled, max_batch_shots, webhook_url \
-             FROM accounts WHERE username = $1 OR email = $1 OR external_id = $1 LIMIT 1",
+             FROM ( \
+                 (SELECT 1 AS prio, id, username, email, active, department, cost_center, roles, qpu_entitled, max_batch_shots, webhook_url FROM accounts WHERE username = $1 LIMIT 1) \
+                 UNION ALL \
+                 (SELECT 2 AS prio, id, username, email, active, department, cost_center, roles, qpu_entitled, max_batch_shots, webhook_url FROM accounts WHERE email = $1 LIMIT 1) \
+                 UNION ALL \
+                 (SELECT 3 AS prio, id, username, email, active, department, cost_center, roles, qpu_entitled, max_batch_shots, webhook_url FROM accounts WHERE external_id = $1 LIMIT 1) \
+             ) AS matched \
+             ORDER BY prio ASC LIMIT 1",
         )
         .bind(&claims.sub)
         .fetch_optional(pool)
@@ -846,85 +933,83 @@ pub async fn issue_demo_oidc_token(req: web::Json<TokenIssueRequest>) -> impl Re
         .unwrap_or("executive")
         .to_ascii_lowercase();
 
-    let (default_sub, default_iss, default_groups, default_scp, default_amr, default_dept, default_cc, default_org, default_qpu, default_batch) =
-        match persona.as_str() {
-            "analyst" => (
-                "analyst.actuarial",
-                DEFAULT_OKTA_ISSUER,
-                vec!["Quantum-Analysts".to_string()],
-                vec!["flip:execute".to_string(), "flip:batch".to_string()],
-                vec!["pwd".to_string()],
-                "Actuarial Science",
-                "",
-                None,
-                false,
-                50usize,
-            ),
-            "b2b_partner" => (
-                "partner.reinsurance",
-                DEFAULT_AUTH0_ISSUER,
-                vec!["CIAM-B2B-Partner".to_string()],
-                vec!["flip:execute".to_string(), "flip:batch".to_string()],
-                vec!["pwd".to_string(), "mfa".to_string()],
-                "External Reinsurance Partner",
-                "CC-8800-B2B",
-                Some("org_jordanlenchitz_reinsure_01".to_string()),
-                true,
-                250usize,
-            ),
-            "scim_admin" => (
-                "okta.lifecycle.worker",
-                DEFAULT_OKTA_ISSUER,
-                vec![
-                    "SCIM-Provisioner".to_string(),
-                    "IAM-Governance-Admins".to_string(),
-                ],
-                vec!["scim:manage".to_string(), "governance:review".to_string()],
-                vec!["hwk".to_string(), "mfa".to_string()],
-                "Identity & Access Management",
-                "CC-4010-IAM",
-                None,
-                false,
-                10usize,
-            ),
-            _ => (
-                "ceo",
-                DEFAULT_OKTA_ISSUER,
-                vec![
-                    "Quantum-Executives".to_string(),
-                    "IAM-Governance-Admins".to_string(),
-                ],
-                vec![
-                    "flip:execute".to_string(),
-                    "flip:batch".to_string(),
-                    "qpu:hardware".to_string(),
-                    "governance:review".to_string(),
-                ],
-                vec!["pwd".to_string(), "mfa".to_string(), "hwk".to_string()],
-                "Executive Leadership",
-                "CC-1001-EXEC",
-                None,
-                true,
-                1000usize,
-            ),
-        };
+    struct PersonaDefaults {
+        sub: &'static str,
+        iss: &'static str,
+        groups: &'static [&'static str],
+        scp: &'static [&'static str],
+        amr: &'static [&'static str],
+        dept: &'static str,
+        cc: &'static str,
+        org: Option<&'static str>,
+        qpu: bool,
+        batch: usize,
+    }
 
-    let sub = req.sub.clone().unwrap_or_else(|| default_sub.to_string());
-    let iss = req
-        .issuer
+    let defaults = match persona.as_str() {
+        "analyst" => PersonaDefaults {
+            sub: "analyst.actuarial",
+            iss: DEFAULT_OKTA_ISSUER,
+            groups: &["Quantum-Analysts"],
+            scp: &["flip:execute", "flip:batch"],
+            amr: &["pwd"],
+            dept: "Actuarial Science",
+            cc: "",
+            org: None,
+            qpu: false,
+            batch: 50,
+        },
+        "b2b_partner" => PersonaDefaults {
+            sub: "partner.reinsurance",
+            iss: DEFAULT_AUTH0_ISSUER,
+            groups: &["CIAM-B2B-Partner"],
+            scp: &["flip:execute", "flip:batch"],
+            amr: &["pwd", "mfa"],
+            dept: "External Reinsurance Partner",
+            cc: "CC-8800-B2B",
+            org: Some("org_jordanlenchitz_reinsure_01"),
+            qpu: true,
+            batch: 250,
+        },
+        "scim_admin" => PersonaDefaults {
+            sub: "okta.lifecycle.worker",
+            iss: DEFAULT_OKTA_ISSUER,
+            groups: &["SCIM-Provisioner", "IAM-Governance-Admins"],
+            scp: &["scim:manage", "governance:review"],
+            amr: &["hwk", "mfa"],
+            dept: "Identity & Access Management",
+            cc: "CC-4010-IAM",
+            org: None,
+            qpu: false,
+            batch: 10,
+        },
+        _ => PersonaDefaults {
+            sub: "ceo",
+            iss: DEFAULT_OKTA_ISSUER,
+            groups: &["Quantum-Executives", "IAM-Governance-Admins"],
+            scp: &["flip:execute", "flip:batch", "qpu:hardware", "governance:review"],
+            amr: &["pwd", "mfa", "hwk"],
+            dept: "Executive Leadership",
+            cc: "CC-1001-EXEC",
+            org: None,
+            qpu: true,
+            batch: 1000,
+        },
+    };
+
+    let sub = req.sub.clone().unwrap_or_else(|| defaults.sub.to_string());
+    let iss = req.issuer.clone().unwrap_or_else(|| defaults.iss.to_string());
+    let groups = req
+        .groups
         .clone()
-        .unwrap_or_else(|| default_iss.to_string());
-    let groups = req.groups.clone().unwrap_or(default_groups);
-    let cost_center = req
-        .cost_center
-        .clone()
-        .or_else(|| {
-            if default_cc.is_empty() {
-                None
-            } else {
-                Some(default_cc.to_string())
-            }
-        });
+        .unwrap_or_else(|| defaults.groups.iter().map(|s| (*s).to_string()).collect());
+    let cost_center = req.cost_center.clone().or_else(|| {
+        if defaults.cc.is_empty() {
+            None
+        } else {
+            Some(defaults.cc.to_string())
+        }
+    });
 
     let claims = OidcClaims {
         sub: sub.clone(),
@@ -934,17 +1019,23 @@ pub async fn issue_demo_oidc_token(req: web::Json<TokenIssueRequest>) -> impl Re
         iat: now,
         email: Some(format!("{}@jordanlenchitz.com", sub)),
         groups,
-        scp: default_scp,
-        amr: req.amr.clone().unwrap_or(default_amr),
+        scp: defaults.scp.iter().map(|s| (*s).to_string()).collect(),
+        amr: req
+            .amr
+            .clone()
+            .unwrap_or_else(|| defaults.amr.iter().map(|s| (*s).to_string()).collect()),
         department: Some(
             req.department
                 .clone()
-                .unwrap_or_else(|| default_dept.to_string()),
+                .unwrap_or_else(|| defaults.dept.to_string()),
         ),
         cost_center,
-        org_id: req.org_id.clone().or(default_org),
-        qpu_entitled: Some(req.qpu_entitled.unwrap_or(default_qpu)),
-        max_batch_shots: Some(req.max_batch_shots.unwrap_or(default_batch)),
+        org_id: req
+            .org_id
+            .clone()
+            .or_else(|| defaults.org.map(|s| s.to_string())),
+        qpu_entitled: Some(req.qpu_entitled.unwrap_or(defaults.qpu)),
+        max_batch_shots: Some(req.max_batch_shots.unwrap_or(defaults.batch)),
     };
 
     let token = mint_jwt(&claims);
